@@ -108,9 +108,9 @@ pixi add qgis earthaccess geopandas
 ### Uninstalling
 
 ```bash
-python install.py --uninstall
+python install.py --remove
 # or
-./install.sh --uninstall
+./install.sh --remove
 ```
 
 ## Usage
