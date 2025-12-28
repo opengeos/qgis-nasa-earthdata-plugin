@@ -1,0 +1,47 @@
+[general]
+name=NASA Earthdata
+qgisMinimumVersion=3.28
+description=Search, visualize, and download NASA Earthdata products in QGIS. Supports COG visualization and data footprint display.
+version=0.1.0
+author=Qiusheng Wu
+email=giswqs@gmail.com
+
+about=NASA Earthdata Plugin for QGIS enables searching, visualizing, and downloading data from NASA's Earthdata catalog.
+
+    Features:
+    - Search NASA Earthdata catalog with keywords, bounding box, and temporal filters
+    - Visualize Cloud Optimized GeoTIFFs (COG) directly in QGIS
+    - Display data footprints on the map
+    - Download non-COG data for local visualization
+    - Support for multiple NASA data products including GEDI, MODIS, Landsat, and more
+    - Earthdata Login integration for authenticated access
+    - Settings panel for configuring credentials and preferences
+
+    Requirements:
+    - NASA Earthdata account (register at https://urs.earthdata.nasa.gov/)
+    - Python packages: earthaccess, geopandas
+
+tracker=https://github.com/opengeos/qgis-nasa-earthdata-plugin/issues
+repository=https://github.com/opengeos/qgis-nasa-earthdata-plugin
+
+hasProcessingProvider=no
+
+tags=nasa, earthdata, satellite, remote sensing, COG, cloud optimized geotiff, download, visualization, GEDI, MODIS, Landsat
+
+homepage=https://github.com/opengeos/qgis-nasa-earthdata-plugin
+category=Raster
+icon=icons/icon.svg
+
+experimental=False
+deprecated=False
+
+changelog=
+    0.1.0 - Initial release
+        - NASA Earthdata catalog search functionality
+        - Data footprint visualization
+        - COG layer visualization
+        - Data download capability
+        - Settings panel for credentials
+        - Update checker
+
+

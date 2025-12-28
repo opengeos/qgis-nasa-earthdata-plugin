@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Arrow down -->
+  <path d="M32 8 L32 42" stroke="#0B3D91" stroke-width="6" stroke-linecap="round"/>
+  <path d="M18 32 L32 48 L46 32" fill="none" stroke="#0B3D91" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Tray -->
+  <path d="M12 48 L12 54 Q12 58 16 58 L48 58 Q52 58 52 54 L52 48" fill="none" stroke="#0B3D91" stroke-width="4" stroke-linecap="round"/>
+</svg>
+

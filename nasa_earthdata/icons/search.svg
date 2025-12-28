@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Magnifying glass -->
+  <circle cx="26" cy="26" r="16" fill="none" stroke="#0B3D91" stroke-width="4"/>
+  <circle cx="26" cy="26" r="10" fill="#4A90D9" opacity="0.3"/>
+  <line x1="38" y1="38" x2="54" y2="54" stroke="#0B3D91" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- Globe inside -->
+  <ellipse cx="26" cy="26" rx="6" ry="10" fill="none" stroke="#0B3D91" stroke-width="1.5" opacity="0.6"/>
+  <ellipse cx="26" cy="26" rx="10" ry="4" fill="none" stroke="#0B3D91" stroke-width="1.5" opacity="0.6"/>
+</svg>
+
