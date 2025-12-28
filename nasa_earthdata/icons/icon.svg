@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- NASA Blue Globe Background -->
+  <circle cx="32" cy="32" r="28" fill="#0B3D91"/>
+
+  <!-- Globe highlights -->
+  <ellipse cx="32" cy="32" rx="20" ry="28" fill="none" stroke="#4A90D9" stroke-width="1" opacity="0.6"/>
+  <ellipse cx="32" cy="32" rx="28" ry="10" fill="none" stroke="#4A90D9" stroke-width="1" opacity="0.6"/>
+
+  <!-- Continents simplified -->
+  <path d="M18 22 Q22 18 28 20 Q32 22 30 28 Q28 32 22 30 Q18 28 18 22" fill="#5FAD56"/>
+  <path d="M36 20 Q42 18 46 24 Q48 30 44 34 Q40 36 36 32 Q34 26 36 20" fill="#5FAD56"/>
+  <path d="M24 38 Q30 36 34 40 Q36 44 32 46 Q26 48 24 44 Q22 40 24 38" fill="#5FAD56"/>
+
+  <!-- Satellite orbit -->
+  <ellipse cx="32" cy="32" rx="26" ry="8" fill="none" stroke="#FC3D21" stroke-width="2" stroke-dasharray="4,2" transform="rotate(-30 32 32)"/>
+
+  <!-- Satellite -->
+  <g transform="translate(50, 18)">
+    <rect x="-4" y="-2" width="8" height="4" fill="#E0E0E0"/>
+    <rect x="-10" y="-1" width="6" height="2" fill="#4A90D9"/>
+    <rect x="4" y="-1" width="6" height="2" fill="#4A90D9"/>
+  </g>
+
+  <!-- NASA Red Arc -->
+  <path d="M8 48 Q32 56 56 48" fill="none" stroke="#FC3D21" stroke-width="3" stroke-linecap="round"/>
+</svg>
+
