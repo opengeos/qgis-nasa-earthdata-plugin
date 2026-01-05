@@ -376,6 +376,7 @@ class EarthdataDockWidget(QDockWidget):
         self._search_results = None
         self._search_gdf = None
         self._footprints_layer = None
+        self._temp_footprints_file = None
 
         # Workers
         self._catalog_worker = None
@@ -996,6 +997,7 @@ class EarthdataDockWidget(QDockWidget):
                 tempfile.gettempdir(), "nasa_earthdata_footprints.geojson"
             )
             gdf.to_file(temp_file, driver="GeoJSON")
+            self._temp_footprints_file = temp_file
 
             # Add layer to QGIS
             layer = QgsVectorLayer(temp_file, "NASA Earthdata Footprints", "ogr")
@@ -1082,13 +1084,35 @@ class EarthdataDockWidget(QDockWidget):
             self._log(f"Error zooming to footprints: {e}", error=True)
 
     def _remove_footprints(self):
-        """Remove footprints layer from map."""
+        """Remove footprints layer from map and clean up temporary file."""
         if self._footprints_layer is not None:
             try:
+                # Remove layer from project
                 QgsProject.instance().removeMapLayer(self._footprints_layer.id())
             except Exception:
                 pass
+
+            # Delete the layer object to release file handles (important on Windows)
+            try:
+                del self._footprints_layer
+            except Exception:
+                pass
             self._footprints_layer = None
+
+            # Force garbage collection to ensure file handles are released on Windows
+            import gc
+
+            gc.collect()
+
+        # Delete temporary file if it exists
+        if self._temp_footprints_file is not None:
+            try:
+                if os.path.exists(self._temp_footprints_file):
+                    os.remove(self._temp_footprints_file)
+            except Exception as e:
+                # Log the error but don't fail - file will be overwritten anyway
+                self._log(f"Could not delete temp file: {e}", error=False)
+            self._temp_footprints_file = None
 
     def _on_selection_changed(self):
         """Handle table selection change."""
