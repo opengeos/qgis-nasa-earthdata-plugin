@@ -36,7 +36,7 @@ experimental=False
 deprecated=False
 
 changelog=
-    0.1.1 
+    0.1.1
         - Fix windows deleting file issue (#4)
     0.1.0 - Initial release
         - NASA Earthdata catalog search functionality
