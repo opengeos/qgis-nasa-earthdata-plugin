@@ -1101,6 +1101,7 @@ class EarthdataDockWidget(QDockWidget):
 
             # Force garbage collection to ensure file handles are released on Windows
             import gc
+
             gc.collect()
 
         # Delete temporary file if it exists
