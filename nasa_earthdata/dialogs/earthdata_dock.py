@@ -595,6 +595,10 @@ class EarthdataDockWidget(QDockWidget):
         self.reset_btn.clicked.connect(self._reset)
         action_layout.addWidget(self.reset_btn)
 
+        self.clear_results_btn = QPushButton("Clear Results")
+        self.clear_results_btn.clicked.connect(self._clear_results)
+        action_layout.addWidget(self.clear_results_btn)
+
         layout.addLayout(action_layout)
 
         # Progress bar
@@ -761,6 +765,23 @@ class EarthdataDockWidget(QDockWidget):
                 self.title_label.setText(title)
         except Exception:
             self.title_label.clear()
+
+        # Clear previous search results when dataset changes
+        self._clear_results()
+
+    def _clear_results(self):
+        """Clear search results without resetting other settings."""
+        self.results_table.setRowCount(0)
+        self.results_label.setText("No search performed yet")
+        self.display_btn.setEnabled(False)
+        self.download_btn.setEnabled(False)
+        self.zoom_footprints_btn.setEnabled(False)
+        self.cog_combo.clear()
+        self.cog_combo.setEnabled(False)
+        self._search_results = None
+        self._search_gdf = None
+        self._remove_footprints()
+        self.iface.mapCanvas().refresh()
 
     def _use_map_extent(self):
         """Set bounding box from current map extent."""
@@ -1039,13 +1060,24 @@ class EarthdataDockWidget(QDockWidget):
             # Check if rows are selected in the table
             selected_rows = self.results_table.selectionModel().selectedRows()
 
+            # Clear any previous selection
+            self._footprints_layer.removeSelection()
+
             if selected_rows:
                 # Zoom to selected features only
-                indices = [row.row() for row in selected_rows]
+                indices = set(row.row() for row in selected_rows)
                 # Get bounding box of selected features from the GeoDataFrame
-                selected_gdf = self._search_gdf.iloc[indices]
+                selected_gdf = self._search_gdf.iloc[list(indices)]
                 bounds = selected_gdf.total_bounds  # [minx, miny, maxx, maxy]
                 layer_extent = QgsRectangle(bounds[0], bounds[1], bounds[2], bounds[3])
+
+                # Highlight selected features in the layer
+                feature_ids = []
+                for i, feature in enumerate(self._footprints_layer.getFeatures()):
+                    if i in indices:
+                        feature_ids.append(feature.id())
+                self._footprints_layer.selectByIds(feature_ids)
+
                 self._log(f"Zooming to {len(indices)} selected footprint(s)")
             else:
                 # Zoom to all footprints
@@ -1417,17 +1449,11 @@ class EarthdataDockWidget(QDockWidget):
         """Reset the search panel."""
         self.keyword_input.clear()
         self.bbox_input.clear()
-        self.results_table.setRowCount(0)
-        self.results_label.setText("No search performed yet")
         self.output_text.clear()
         self.status_label.setText("Ready")
-        self.display_btn.setEnabled(False)
-        self.download_btn.setEnabled(False)
-        self.zoom_footprints_btn.setEnabled(False)
 
-        # Clear COG dropdown
-        self.cog_combo.clear()
-        self.cog_combo.setEnabled(False)
+        # Clear search results
+        self._clear_results()
 
         # Reset advanced options
         self.advanced_check.setChecked(False)
@@ -1439,12 +1465,6 @@ class EarthdataDockWidget(QDockWidget):
         self.granule_id_input.clear()
         self.orbit_min_spin.setValue(0)
         self.orbit_max_spin.setValue(0)
-
-        self._search_results = None
-        self._search_gdf = None
-        self._remove_footprints()
-
-        self.iface.mapCanvas().refresh()
 
         # Reset dataset list
         if self._nasa_data_names:
