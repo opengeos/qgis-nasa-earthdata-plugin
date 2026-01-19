@@ -47,7 +47,6 @@ from qgis.core import (
     QgsRectangle,
 )
 
-
 # NASA Earthdata TSV URL
 NASA_DATA_URL = (
     "https://github.com/opengeos/NASA-Earth-Data/raw/main/nasa_earth_data.tsv"
