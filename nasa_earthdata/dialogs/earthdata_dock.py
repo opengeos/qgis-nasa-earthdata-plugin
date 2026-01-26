@@ -242,7 +242,8 @@ class COGDisplayWorker(QThread):
             self.progress.emit("Authenticating with NASA Earthdata...")
 
             # Login and get session with cookies
-            auth = earthaccess.login()
+            # Use strategy="environment" to avoid stdin prompts in QGIS plugin environment
+            auth = earthaccess.login(strategy="environment", persist=False)
             if not auth.authenticated:
                 self.error.emit(
                     "NASA Earthdata authentication failed. Please check your credentials."
@@ -1116,6 +1117,9 @@ class EarthdataDockWidget(QDockWidget):
 
     def _remove_footprints(self):
         """Remove footprints layer from map and clean up temporary file."""
+        import time
+        import platform
+        
         if self._footprints_layer is not None:
             try:
                 # Remove layer from project
@@ -1134,12 +1138,31 @@ class EarthdataDockWidget(QDockWidget):
             import gc
 
             gc.collect()
+            
+            # On Windows, give the OS a moment to release file handles
+            if platform.system() == "Windows":
+                time.sleep(0.1)
 
         # Delete temporary file if it exists
         if self._temp_footprints_file is not None:
             try:
                 if os.path.exists(self._temp_footprints_file):
-                    os.remove(self._temp_footprints_file)
+                    # On Windows, retry a few times if file is locked
+                    max_retries = 3 if platform.system() == "Windows" else 1
+                    for attempt in range(max_retries):
+                        try:
+                            os.remove(self._temp_footprints_file)
+                            break  # Success
+                        except (PermissionError, OSError) as e:
+                            if attempt < max_retries - 1:
+                                # Wait and retry on Windows
+                                time.sleep(0.1)
+                            else:
+                                # Final attempt failed - log but don't raise
+                                self._log(
+                                    f"Could not delete temp file (will be reused): {e}",
+                                    error=False,
+                                )
             except Exception as e:
                 # Log the error but don't fail - file will be overwritten anyway
                 self._log(f"Could not delete temp file: {e}", error=False)
