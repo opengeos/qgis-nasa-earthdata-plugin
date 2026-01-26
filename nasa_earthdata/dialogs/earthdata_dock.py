@@ -243,7 +243,7 @@ class COGDisplayWorker(QThread):
 
             # Login and get session with cookies
             # Use strategy="environment" to avoid stdin prompts in QGIS plugin environment
-            auth = earthaccess.login(strategy="environment")
+            auth = earthaccess.login(strategy="environment", persist=True)
             if not auth.authenticated:
                 self.error.emit(
                     "NASA Earthdata authentication failed. Please check your credentials."
