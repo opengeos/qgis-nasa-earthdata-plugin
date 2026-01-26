@@ -1119,7 +1119,7 @@ class EarthdataDockWidget(QDockWidget):
         """Remove footprints layer from map and clean up temporary file."""
         import time
         import platform
-        
+
         if self._footprints_layer is not None:
             try:
                 # Remove layer from project
@@ -1138,7 +1138,7 @@ class EarthdataDockWidget(QDockWidget):
             import gc
 
             gc.collect()
-            
+
             # On Windows, give the OS a moment to release file handles
             if platform.system() == "Windows":
                 time.sleep(0.1)
