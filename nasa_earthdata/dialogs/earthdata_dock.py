@@ -7,7 +7,9 @@ and downloading NASA Earthdata products in QGIS.
 
 import os
 import json
+import platform
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -1117,9 +1119,6 @@ class EarthdataDockWidget(QDockWidget):
 
     def _remove_footprints(self):
         """Remove footprints layer from map and clean up temporary file."""
-        import time
-        import platform
-
         if self._footprints_layer is not None:
             try:
                 # Remove layer from project
@@ -1145,27 +1144,23 @@ class EarthdataDockWidget(QDockWidget):
 
         # Delete temporary file if it exists
         if self._temp_footprints_file is not None:
-            try:
-                if os.path.exists(self._temp_footprints_file):
-                    # On Windows, retry a few times if file is locked
-                    max_retries = 3 if platform.system() == "Windows" else 1
-                    for attempt in range(max_retries):
-                        try:
-                            os.remove(self._temp_footprints_file)
-                            break  # Success
-                        except (PermissionError, OSError) as e:
-                            if attempt < max_retries - 1:
-                                # Wait and retry on Windows
-                                time.sleep(0.1)
-                            else:
-                                # Final attempt failed - log but don't raise
-                                self._log(
-                                    f"Could not delete temp file (will be reused): {e}",
-                                    error=False,
-                                )
-            except Exception as e:
-                # Log the error but don't fail - file will be overwritten anyway
-                self._log(f"Could not delete temp file: {e}", error=False)
+            if os.path.exists(self._temp_footprints_file):
+                # On Windows, retry a few times if file is locked
+                max_retries = 3 if platform.system() == "Windows" else 1
+                for attempt in range(max_retries):
+                    try:
+                        os.remove(self._temp_footprints_file)
+                        break  # Success
+                    except (PermissionError, OSError) as e:
+                        if attempt < max_retries - 1:
+                            # Wait and retry on Windows
+                            time.sleep(0.1)
+                        else:
+                            # Final attempt failed - log but don't raise
+                            self._log(
+                                f"Could not delete temp file (will be reused): {e}",
+                                error=False,
+                            )
             self._temp_footprints_file = None
 
     def _on_selection_changed(self):
