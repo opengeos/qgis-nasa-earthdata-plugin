@@ -18,6 +18,16 @@ A QGIS plugin for searching, visualizing, and downloading NASA Earthdata product
 
 ![](https://github.com/user-attachments/assets/6f243a41-cf97-4943-9918-33ad4886280b)
 
+## Video Tutorials
+
+ 👉 [The Easiest Way to Access 120 Petabytes of NASA Data Inside QGIS](https://youtu.be/H78l-3nbPfk)
+
+[![NASA Earthdata QGIS Plugin Tutorial](https://github.com/user-attachments/assets/af264307-f747-4763-87fc-2598d53e25bb)](https://youtu.be/H78l-3nbPfk)
+
+👉 [How to Download and Visualize NISAR Data in QGIS](https://youtu.be/oRTplHPf_T0)
+
+[![NISAR Tutorial](https://github.com/user-attachments/assets/9050116a-8eb5-40a4-a0bf-9678f56f2378)](https://youtu.be/oRTplHPf_T0)
+
 ## Installation
 
 ### Prerequisites
