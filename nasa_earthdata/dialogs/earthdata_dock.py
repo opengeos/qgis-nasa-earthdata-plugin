@@ -60,6 +60,25 @@ CATALOG_CACHE_FILE = CACHE_DIR / "nasa_earth_data.tsv"
 CATALOG_CACHE_MAX_AGE_DAYS = 7
 
 
+class NumericTableWidgetItem(QTableWidgetItem):
+    """Custom QTableWidgetItem that sorts numerically using UserRole data."""
+
+    def __lt__(self, other):
+        """Compare items using numeric data stored in UserRole."""
+        try:
+            self_data = self.data(Qt.UserRole)
+            other_data = other.data(Qt.UserRole)
+            # Handle None values
+            if self_data is None:
+                return True
+            if other_data is None:
+                return False
+            return float(self_data) < float(other_data)
+        except (ValueError, TypeError):
+            # Fallback to string comparison if numeric comparison fails
+            return super().__lt__(other)
+
+
 class CatalogLoadWorker(QThread):
     """Worker thread for loading the NASA Earthdata catalog."""
 
@@ -630,6 +649,12 @@ class EarthdataDockWidget(QDockWidget):
         # Enable tooltips for truncated text
         self.results_table.setMouseTracking(True)
         self.results_table.itemSelectionChanged.connect(self._on_selection_changed)
+        # Enable sorting
+        self.results_table.setSortingEnabled(True)
+        # Connect double-click on header to sort
+        self.results_table.horizontalHeader().sectionDoubleClicked.connect(
+            self._on_header_double_clicked
+        )
         results_layout.addWidget(self.results_table)
 
         # COG file selection dropdown
@@ -938,6 +963,8 @@ class EarthdataDockWidget(QDockWidget):
         self.results_label.setText(f"Found {len(results)} results")
 
         # Populate results table
+        # Disable sorting temporarily for performance during population
+        self.results_table.setSortingEnabled(False)
         self.results_table.setRowCount(len(results))
         for i, granule in enumerate(results):
             try:
@@ -953,32 +980,47 @@ class EarthdataDockWidget(QDockWidget):
                     time_start = time_start[:10]  # Just the date part
 
                 # Estimate size
-                size = "N/A"
+                size_display = "N/A"
+                size_bytes = 0  # For sorting
                 data_granule = granule.get("umm", {}).get("DataGranule", {})
                 if "ArchiveAndDistributionInformation" in data_granule:
                     for info in data_granule["ArchiveAndDistributionInformation"]:
                         if "SizeInBytes" in info:
                             size_bytes = info["SizeInBytes"]
                             if size_bytes > 1e9:
-                                size = f"{size_bytes / 1e9:.1f} GB"
+                                size_display = f"{size_bytes / 1e9:.1f} GB"
                             elif size_bytes > 1e6:
-                                size = f"{size_bytes / 1e6:.1f} MB"
+                                size_display = f"{size_bytes / 1e6:.1f} MB"
                             else:
-                                size = f"{size_bytes / 1e3:.1f} KB"
+                                size_display = f"{size_bytes / 1e3:.1f} KB"
                             break
 
                 # Create items with tooltips for full text
                 id_item = QTableWidgetItem(str(native_id))
                 id_item.setToolTip(str(native_id))  # Show full ID on hover
                 self.results_table.setItem(i, 0, id_item)
-                self.results_table.setItem(i, 1, QTableWidgetItem(str(time_start)))
-                self.results_table.setItem(i, 2, QTableWidgetItem(str(size)))
+
+                date_item = QTableWidgetItem(str(time_start))
+                self.results_table.setItem(i, 1, date_item)
+
+                # Store raw bytes for proper numeric sorting
+                size_item = NumericTableWidgetItem(str(size_display))
+                size_item.setData(
+                    Qt.UserRole, size_bytes
+                )  # Store raw value for sorting
+                self.results_table.setItem(i, 2, size_item)
             except Exception:
                 id_item = QTableWidgetItem(f"Item {i+1}")
                 id_item.setToolTip(f"Item {i+1}")
                 self.results_table.setItem(i, 0, id_item)
                 self.results_table.setItem(i, 1, QTableWidgetItem("N/A"))
-                self.results_table.setItem(i, 2, QTableWidgetItem("N/A"))
+
+                size_item = NumericTableWidgetItem("N/A")
+                size_item.setData(Qt.UserRole, 0)  # Store 0 for N/A
+                self.results_table.setItem(i, 2, size_item)
+
+        # Re-enable sorting after population
+        self.results_table.setSortingEnabled(True)
 
         # Add footprints to map
         self._add_footprints(gdf)
@@ -1181,6 +1223,29 @@ class EarthdataDockWidget(QDockWidget):
             # Clear COG dropdown
             self.cog_combo.clear()
             self.cog_combo.setEnabled(False)
+
+    def _on_header_double_clicked(self, logical_index):
+        """Handle double-click on table header to toggle sort order."""
+        # Get current sort order for this column
+        header = self.results_table.horizontalHeader()
+        current_order = header.sortIndicatorOrder()
+
+        # Toggle sort order: if already sorted by this column, reverse it
+        if header.sortIndicatorSection() == logical_index:
+            new_order = (
+                Qt.DescendingOrder
+                if current_order == Qt.AscendingOrder
+                else Qt.AscendingOrder
+            )
+        else:
+            # Default to ascending for new column
+            new_order = Qt.AscendingOrder
+
+        # Apply the sort
+        self.results_table.sortItems(logical_index, new_order)
+        self._log(
+            f"Sorted by column {logical_index} ({'descending' if new_order == Qt.DescendingOrder else 'ascending'})"
+        )
 
     def _populate_cog_dropdown(self, row_index):
         """Populate the COG dropdown with available files for the selected granule."""
