@@ -25,6 +25,7 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QFileDialog,
     QTabWidget,
+    QProgressBar,
 )
 from qgis.PyQt.QtGui import QFont
 
@@ -45,6 +46,7 @@ class SettingsDockWidget(QDockWidget):
         super().__init__("NASA Earthdata Settings", parent)
         self.iface = iface
         self.settings = QSettings()
+        self._deps_worker = None
 
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
 
@@ -71,20 +73,24 @@ class SettingsDockWidget(QDockWidget):
         layout.addWidget(header_label)
 
         # Tab widget for organized settings
-        tab_widget = QTabWidget()
-        layout.addWidget(tab_widget)
+        self.tab_widget = QTabWidget()
+        layout.addWidget(self.tab_widget)
+
+        # Dependencies tab (first tab)
+        deps_tab = self._create_dependencies_tab()
+        self.tab_widget.addTab(deps_tab, "Dependencies")
 
         # Credentials tab
         credentials_tab = self._create_credentials_tab()
-        tab_widget.addTab(credentials_tab, "Credentials")
+        self.tab_widget.addTab(credentials_tab, "Credentials")
 
         # General settings tab
         general_tab = self._create_general_tab()
-        tab_widget.addTab(general_tab, "General")
+        self.tab_widget.addTab(general_tab, "General")
 
         # Advanced settings tab
         advanced_tab = self._create_advanced_tab()
-        tab_widget.addTab(advanced_tab, "Advanced")
+        self.tab_widget.addTab(advanced_tab, "Advanced")
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -287,6 +293,172 @@ class SettingsDockWidget(QDockWidget):
         layout.addStretch()
         return widget
 
+    def _create_dependencies_tab(self):
+        """Create the dependencies management tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # Info label
+        info_label = QLabel(
+            "This plugin requires additional Python packages.\n"
+            "Click 'Install Dependencies' to install them in an\n"
+            "isolated virtual environment."
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("font-size: 10px;")
+        layout.addWidget(info_label)
+
+        # Package status group
+        status_group = QGroupBox("Package Status")
+        self._deps_status_layout = QFormLayout(status_group)
+
+        # Create status labels for each package
+        self._deps_labels = {}
+        from ..core.venv_manager import REQUIRED_PACKAGES
+
+        for package_name, _version_spec in REQUIRED_PACKAGES:
+            label = QLabel("Checking...")
+            label.setStyleSheet("color: gray;")
+            self._deps_labels[package_name] = label
+            self._deps_status_layout.addRow(f"{package_name}:", label)
+
+        layout.addWidget(status_group)
+
+        # Install button
+        self.install_deps_btn = QPushButton("Install Dependencies")
+        self.install_deps_btn.setStyleSheet("background-color: #0B3D91; color: white;")
+        self.install_deps_btn.clicked.connect(self._install_dependencies)
+        layout.addWidget(self.install_deps_btn)
+
+        # Progress bar (hidden by default)
+        self.deps_progress_bar = QProgressBar()
+        self.deps_progress_bar.setVisible(False)
+        layout.addWidget(self.deps_progress_bar)
+
+        # Progress/status label
+        self.deps_progress_label = QLabel("")
+        self.deps_progress_label.setWordWrap(True)
+        self.deps_progress_label.setVisible(False)
+        layout.addWidget(self.deps_progress_label)
+
+        # Cancel button (hidden by default)
+        self.cancel_deps_btn = QPushButton("Cancel")
+        self.cancel_deps_btn.setStyleSheet("color: red;")
+        self.cancel_deps_btn.setVisible(False)
+        self.cancel_deps_btn.clicked.connect(self._cancel_deps_install)
+        layout.addWidget(self.cancel_deps_btn)
+
+        # Refresh button
+        self.refresh_deps_btn = QPushButton("Refresh Status")
+        self.refresh_deps_btn.clicked.connect(self._refresh_deps_status)
+        layout.addWidget(self.refresh_deps_btn)
+
+        layout.addStretch()
+
+        # Initial status check
+        self._refresh_deps_status()
+
+        return widget
+
+    def _refresh_deps_status(self):
+        """Refresh the dependency status display."""
+        from ..core.venv_manager import check_dependencies
+
+        all_ok, missing, installed = check_dependencies()
+
+        for package_name, version in installed:
+            if package_name in self._deps_labels:
+                self._deps_labels[package_name].setText(f"v{version} (installed)")
+                self._deps_labels[package_name].setStyleSheet(
+                    "color: green; font-weight: bold;"
+                )
+
+        for package_name, _version_spec in missing:
+            if package_name in self._deps_labels:
+                self._deps_labels[package_name].setText("Not installed")
+                self._deps_labels[package_name].setStyleSheet("color: red;")
+
+        self.install_deps_btn.setEnabled(not all_ok)
+        if all_ok:
+            self.install_deps_btn.setText("All Dependencies Installed")
+        else:
+            self.install_deps_btn.setText(
+                f"Install Dependencies ({len(missing)} missing)"
+            )
+
+    def _install_dependencies(self):
+        """Start installing missing dependencies."""
+        from .deps_manager import DepsInstallWorker
+
+        # Guard against concurrent installs
+        if self._deps_worker is not None and self._deps_worker.isRunning():
+            return
+
+        # Update UI for installation mode
+        self.install_deps_btn.setEnabled(False)
+        self.refresh_deps_btn.setEnabled(False)
+        self.deps_progress_bar.setVisible(True)
+        self.deps_progress_bar.setRange(0, 100)
+        self.deps_progress_bar.setValue(0)
+        self.deps_progress_label.setVisible(True)
+        self.deps_progress_label.setText("Starting installation...")
+        self.deps_progress_label.setStyleSheet("")
+        self.cancel_deps_btn.setVisible(True)
+        self.cancel_deps_btn.setEnabled(True)
+
+        # Start worker
+        self._deps_worker = DepsInstallWorker()
+        self._deps_worker.progress.connect(self._on_deps_progress)
+        self._deps_worker.finished.connect(self._on_deps_finished)
+        self._deps_worker.start()
+
+    def _on_deps_progress(self, percent, message):
+        """Handle progress updates from the dependency install worker.
+
+        Args:
+            percent: Installation progress percentage (0-100).
+            message: Status message describing current operation.
+        """
+        self.deps_progress_bar.setValue(percent)
+        self.deps_progress_label.setText(message)
+
+    def _on_deps_finished(self, success, message):
+        """Handle completion of the dependency installation.
+
+        Args:
+            success: True if all packages installed successfully.
+            message: Summary message.
+        """
+        # Reset UI
+        self.deps_progress_bar.setVisible(False)
+        self.deps_progress_label.setText(message)
+        self.cancel_deps_btn.setVisible(False)
+        self.refresh_deps_btn.setEnabled(True)
+
+        if success:
+            self.deps_progress_label.setStyleSheet("color: green;")
+            self.iface.messageBar().pushSuccess(
+                "NASA Earthdata", "Dependencies installed successfully!"
+            )
+        else:
+            self.deps_progress_label.setStyleSheet("color: red;")
+            self.install_deps_btn.setEnabled(True)
+
+        # Refresh status display
+        self._refresh_deps_status()
+
+    def _cancel_deps_install(self):
+        """Cancel the ongoing dependency installation."""
+        if self._deps_worker is not None and self._deps_worker.isRunning():
+            self._deps_worker.cancel()
+            self.cancel_deps_btn.setEnabled(False)
+            self.deps_progress_label.setText("Cancelling...")
+
+    def show_dependencies_tab(self):
+        """Switch to the Dependencies tab and refresh status."""
+        self.tab_widget.setCurrentIndex(0)
+        self._refresh_deps_status()
+
     def _browse_download_dir(self):
         """Open directory browser for download directory."""
         dir_path = QFileDialog.getExistingDirectory(
@@ -317,6 +489,9 @@ class SettingsDockWidget(QDockWidget):
         self.creds_status_label.setStyleSheet("color: blue;")
 
         try:
+            from ..core.venv_manager import ensure_venv_packages_available
+
+            ensure_venv_packages_available()
             import earthaccess
 
             # Set environment variables for earthaccess

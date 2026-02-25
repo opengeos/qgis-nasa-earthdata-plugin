@@ -7,9 +7,11 @@ This module contains the dialog and dock widget classes for the NASA Earthdata p
 from .earthdata_dock import EarthdataDockWidget
 from .settings_dock import SettingsDockWidget
 from .update_checker import UpdateCheckerDialog
+from .deps_manager import DepsInstallWorker
 
 __all__ = [
     "EarthdataDockWidget",
     "SettingsDockWidget",
     "UpdateCheckerDialog",
+    "DepsInstallWorker",
 ]
