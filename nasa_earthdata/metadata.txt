@@ -37,7 +37,7 @@ deprecated=False
 
 changelog=
     0.4.0
-        - Add one-click depdendency installer
+        - Add one-click dependency installer
     0.3.0
         - Add support for sorting table by column
     0.2.1
