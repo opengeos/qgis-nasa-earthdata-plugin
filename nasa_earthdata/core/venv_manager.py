@@ -17,7 +17,6 @@ from typing import Tuple, Optional, Callable, List
 
 from qgis.core import QgsMessageLog, Qgis
 
-
 CACHE_DIR = os.path.expanduser("~/.qgis_nasa_earthdata")
 PYTHON_VERSION = f"py{sys.version_info.major}.{sys.version_info.minor}"
 VENV_DIR = os.path.join(CACHE_DIR, f"venv_{PYTHON_VERSION}")

@@ -22,7 +22,6 @@ from qgis.core import QgsMessageLog, Qgis, QgsBlockingNetworkRequest
 from qgis.PyQt.QtCore import QUrl
 from qgis.PyQt.QtNetwork import QNetworkRequest
 
-
 CACHE_DIR = os.path.expanduser("~/.qgis_nasa_earthdata")
 STANDALONE_DIR = os.path.join(CACHE_DIR, "python_standalone")
 
