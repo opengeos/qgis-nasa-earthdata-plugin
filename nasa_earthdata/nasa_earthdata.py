@@ -192,6 +192,9 @@ class NASAEarthdata:
                 self.iface.addDockWidget(Qt.RightDockWidgetArea, self._earthdata_dock)
                 self._earthdata_dock.show()
                 self._earthdata_dock.raise_()
+
+                # Check dependencies on first open
+                self._check_dependencies_on_open()
                 return
 
             except Exception as e:
@@ -251,6 +254,63 @@ class NASAEarthdata:
     def _on_settings_visibility_changed(self, visible):
         """Handle Settings dock visibility change."""
         self.settings_action.setChecked(visible)
+
+    def _check_dependencies_on_open(self):
+        """Check if required dependencies are installed and prompt if missing."""
+        try:
+            from .core.venv_manager import check_dependencies
+
+            all_ok, missing, _installed = check_dependencies()
+            if all_ok:
+                return
+
+            missing_names = ", ".join(name for name, _ in missing)
+            reply = QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Missing Dependencies",
+                f"The following required packages are not installed:\n\n"
+                f"  {missing_names}\n\n"
+                f"The plugin needs these packages to search and download data.\n\n"
+                f"Would you like to open Settings to install them?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+
+            if reply == QMessageBox.Yes:
+                self._open_settings_deps_tab()
+
+        except Exception:
+            # Don't let dependency check errors prevent the dock from opening
+            pass
+
+    def _open_settings_deps_tab(self):
+        """Open the Settings dock and switch to the Dependencies tab."""
+        if self._settings_dock is None:
+            try:
+                from .dialogs.settings_dock import SettingsDockWidget
+
+                self._settings_dock = SettingsDockWidget(
+                    self.iface, self.iface.mainWindow()
+                )
+                self._settings_dock.setObjectName("NASAEarthdataSettingsDock")
+                self._settings_dock.visibilityChanged.connect(
+                    self._on_settings_visibility_changed
+                )
+                self.iface.addDockWidget(Qt.RightDockWidgetArea, self._settings_dock)
+            except Exception as e:
+                QMessageBox.critical(
+                    self.iface.mainWindow(),
+                    "Error",
+                    f"Failed to create Settings panel:\n{str(e)}",
+                )
+                return
+
+        self._settings_dock.show()
+        self._settings_dock.raise_()
+        self.settings_action.setChecked(True)
+
+        # Switch to Dependencies tab
+        self._settings_dock.show_dependencies_tab()
 
     def show_about(self):
         """Display the about dialog."""

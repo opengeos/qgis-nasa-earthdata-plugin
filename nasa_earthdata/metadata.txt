@@ -2,7 +2,7 @@
 name=NASA Earthdata
 qgisMinimumVersion=3.28
 description=Search, visualize, and download NASA Earthdata products in QGIS. Supports COG visualization and data footprint display.
-version=0.3.0
+version=0.4.0
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -36,6 +36,8 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.4.0
+        - Add one-click depdendency installer
     0.3.0
         - Add support for sorting table by column
     0.2.1

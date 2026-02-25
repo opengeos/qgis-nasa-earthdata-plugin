@@ -93,6 +93,13 @@ class CatalogLoadWorker(QThread):
     def run(self):
         """Load the catalog from cache or download."""
         try:
+            from ..core.venv_manager import ensure_venv_packages_available
+
+            if not ensure_venv_packages_available():
+                raise RuntimeError(
+                    "Plugin Python dependencies are not installed. "
+                    "Open Settings and run 'Install Dependencies'."
+                )
             import pandas as pd
 
             # Ensure cache directory exists
@@ -160,6 +167,9 @@ class DataSearchWorker(QThread):
         """Execute the search."""
         try:
             self.progress.emit("Importing earthaccess...")
+            from ..core.venv_manager import ensure_venv_packages_available
+
+            ensure_venv_packages_available()
             import earthaccess
 
             self.progress.emit("Searching NASA Earthdata...")
@@ -207,12 +217,16 @@ class DataSearchWorker(QThread):
 
     def _granules_to_gdf(self, granules):
         """Convert granules to GeoDataFrame."""
+        from ..core.venv_manager import ensure_venv_packages_available
+
+        ensure_venv_packages_available()
         import geopandas as gpd
         import pandas as pd
         from shapely.geometry import Polygon, box
 
         df = pd.json_normalize([dict(i.items()) for i in granules])
         df.columns = [col.split(".")[-1] for col in df.columns]
+        df["result_idx"] = range(len(df))
 
         if "Version" in df.columns:
             df = df.drop("Version", axis=1)
@@ -237,7 +251,17 @@ class DataSearchWorker(QThread):
         elif "GPolygons" in df.columns:
             df["geometry"] = df["GPolygons"].apply(get_polygon)
 
-        gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+        # Build the GeoDataFrame first, then assign CRS. In some QGIS/venv setups
+        # pyproj can import but fail to resolve EPSG codes if the PROJ database is
+        # not discoverable ("no database context specified"). The geometries are
+        # still lon/lat WGS84, so continue without CRS metadata and set it in QGIS.
+        gdf = gpd.GeoDataFrame(df, geometry="geometry")
+        try:
+            gdf.set_crs("EPSG:4326", inplace=True, allow_override=True)
+        except Exception as e:
+            self.progress.emit(
+                f"Warning: Could not assign CRS metadata (assuming WGS84): {e}"
+            )
         return gdf
 
 
@@ -250,24 +274,147 @@ class COGDisplayWorker(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, granules, selected_cog_url=None, parent=None):
+    def __init__(
+        self,
+        granules,
+        selected_cog_url=None,
+        auth_username=None,
+        auth_password=None,
+        auth_token=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.granules = granules
         self.selected_cog_url = selected_cog_url  # Specific COG URL if provided
+        self.auth_username = (auth_username or "").strip()
+        self.auth_password = (auth_password or "").strip()
+        self.auth_token = (auth_token or "").strip()
+
+    def _has_env_credentials(self):
+        """Return True if current environment has usable Earthdata credentials."""
+        env_user = os.environ.get("EARTHDATA_USERNAME", "").strip()
+        env_pass = os.environ.get("EARTHDATA_PASSWORD", "").strip()
+        env_token = os.environ.get("EARTHDATA_TOKEN", "").strip()
+        return bool(env_token or (env_user and env_pass))
+
+    def _get_env_credentials(self):
+        """Read Earthdata credentials from current process environment."""
+        env_user = os.environ.get("EARTHDATA_USERNAME", "").strip()
+        env_pass = os.environ.get("EARTHDATA_PASSWORD", "").strip()
+        env_token = os.environ.get("EARTHDATA_TOKEN", "").strip()
+        return {"username": env_user, "password": env_pass, "token": env_token}
+
+    def _get_netrc_credentials(self):
+        """Load credentials from ~/.netrc if present."""
+        netrc_path = os.path.expanduser("~/.netrc")
+        if not os.path.exists(netrc_path):
+            return None
+
+        try:
+            import netrc
+
+            auth = netrc.netrc(netrc_path).authenticators("urs.earthdata.nasa.gov")
+            if not auth:
+                return None
+
+            username, _, password = auth
+            if username and password:
+                return {"username": username, "password": password}
+        except Exception:
+            return None
+
+        return None
+
+    def _login_with_environment_strategy(
+        self, earthaccess, source_label, username=None, password=None, token=None
+    ):
+        """Authenticate using earthaccess environment strategy, optionally with temp creds."""
+        keys = ("EARTHDATA_USERNAME", "EARTHDATA_PASSWORD", "EARTHDATA_TOKEN")
+        original_env = {k: os.environ.get(k) for k in keys}
+
+        try:
+            # Clear all three first so each attempt uses only the intended source.
+            for key in keys:
+                os.environ.pop(key, None)
+
+            if token:
+                os.environ["EARTHDATA_TOKEN"] = token
+            elif username and password:
+                os.environ["EARTHDATA_USERNAME"] = username
+                os.environ["EARTHDATA_PASSWORD"] = password
+
+            self.progress.emit(
+                f"Authenticating with NASA Earthdata ({source_label})..."
+            )
+            auth = earthaccess.login(strategy="environment", persist=True)
+            if getattr(auth, "authenticated", False):
+                return auth, None
+            return None, f"Authentication failed using {source_label}"
+        except Exception as e:
+            return None, str(e)
+        finally:
+            # Restore original process environment to avoid side effects across attempts.
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     def run(self):
         """Get authenticated URLs for COG files."""
         try:
+            from ..core.venv_manager import ensure_venv_packages_available
+
+            ensure_venv_packages_available()
             import earthaccess
 
-            self.progress.emit("Authenticating with NASA Earthdata...")
+            auth = None
+            auth_errors = []
 
-            # Login and get session with cookies
-            # Use strategy="environment" to avoid stdin prompts in QGIS plugin environment
-            auth = earthaccess.login(strategy="environment", persist=True)
-            if not auth.authenticated:
+            # 1) ~/.netrc (preferred)
+            netrc_creds = self._get_netrc_credentials()
+            if netrc_creds:
+                auth, err = self._login_with_environment_strategy(
+                    earthaccess,
+                    ".netrc",
+                    username=netrc_creds.get("username"),
+                    password=netrc_creds.get("password"),
+                )
+                if err and auth is None:
+                    auth_errors.append(f".netrc: {err}")
+
+            # 2) Existing environment variables (EARTHDATA_* / token)
+            if auth is None and self._has_env_credentials():
+                env_creds = self._get_env_credentials()
+                auth, err = self._login_with_environment_strategy(
+                    earthaccess,
+                    "environment variables",
+                    username=env_creds.get("username"),
+                    password=env_creds.get("password"),
+                    token=env_creds.get("token"),
+                )
+                if err and auth is None:
+                    auth_errors.append(f"environment: {err}")
+
+            # 3) Credentials entered in plugin settings input boxes (if passed in)
+            if auth is None and (
+                self.auth_token or (self.auth_username and self.auth_password)
+            ):
+                auth, err = self._login_with_environment_strategy(
+                    earthaccess,
+                    "settings input",
+                    username=self.auth_username,
+                    password=self.auth_password,
+                    token=self.auth_token,
+                )
+                if err and auth is None:
+                    auth_errors.append(f"settings input: {err}")
+
+            if auth is None or not getattr(auth, "authenticated", False):
+                detail = f" ({'; '.join(auth_errors)})" if auth_errors else ""
                 self.error.emit(
-                    "NASA Earthdata authentication failed. Please check your credentials."
+                    "NASA Earthdata authentication failed. Tried .netrc, environment "
+                    f"variables, then settings input.{detail}"
                 )
                 return
 
@@ -354,6 +501,9 @@ class DataDownloadWorker(QThread):
     def run(self):
         """Execute the download."""
         try:
+            from ..core.venv_manager import ensure_venv_packages_available
+
+            ensure_venv_packages_available()
             import earthaccess
 
             self.progress.emit(10, "Authenticating...")
@@ -749,6 +899,19 @@ class EarthdataDockWidget(QDockWidget):
         """Handle catalog load error."""
         self.refresh_catalog_btn.setEnabled(True)
         self._log(f"Error loading catalog: {error_msg}", error=True)
+        error_lower = str(error_msg).lower()
+
+        if "no module named" in error_lower:
+            QMessageBox.warning(
+                self,
+                "Dependencies Missing",
+                f"Failed to load NASA Earthdata catalog:\n{error_msg}\n\n"
+                "This is a plugin dependency issue, not a network issue.\n"
+                "Open the plugin Settings and run 'Install Dependencies', "
+                "then restart QGIS.",
+            )
+            return
+
         QMessageBox.warning(
             self,
             "Warning",
@@ -998,6 +1161,9 @@ class EarthdataDockWidget(QDockWidget):
                 # Create items with tooltips for full text
                 id_item = QTableWidgetItem(str(native_id))
                 id_item.setToolTip(str(native_id))  # Show full ID on hover
+                id_item.setData(
+                    Qt.UserRole, i
+                )  # Stable index into _search_results/_search_gdf
                 self.results_table.setItem(i, 0, id_item)
 
                 date_item = QTableWidgetItem(str(time_start))
@@ -1012,6 +1178,7 @@ class EarthdataDockWidget(QDockWidget):
             except Exception:
                 id_item = QTableWidgetItem(f"Item {i+1}")
                 id_item.setToolTip(f"Item {i+1}")
+                id_item.setData(Qt.UserRole, i)
                 self.results_table.setItem(i, 0, id_item)
                 self.results_table.setItem(i, 1, QTableWidgetItem("N/A"))
 
@@ -1048,6 +1215,32 @@ class EarthdataDockWidget(QDockWidget):
         else:
             QMessageBox.critical(self, "Search Error", f"Search failed:\n{error_msg}")
 
+    def _write_footprints_geojson_fallback(self, gdf, output_path):
+        """Write footprints as GeoJSON without pyogrio/fiona."""
+        features = []
+
+        for i in range(len(gdf)):
+            geom = None
+            try:
+                geom_obj = gdf.geometry.iloc[i]
+                if geom_obj is not None and not geom_obj.is_empty:
+                    geom = geom_obj.__geo_interface__
+            except Exception:
+                geom = None
+
+            # Minimal properties are enough for display and selection handling.
+            features.append(
+                {
+                    "type": "Feature",
+                    "properties": {"result_idx": int(i)},
+                    "geometry": geom,
+                }
+            )
+
+        geojson = {"type": "FeatureCollection", "features": features}
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(geojson, f)
+
     def _add_footprints(self, gdf):
         """Add search result footprints to the map."""
         if gdf is None:
@@ -1061,12 +1254,23 @@ class EarthdataDockWidget(QDockWidget):
             temp_file = os.path.join(
                 tempfile.gettempdir(), "nasa_earthdata_footprints.geojson"
             )
-            gdf.to_file(temp_file, driver="GeoJSON")
+            try:
+                gdf.to_file(temp_file, driver="GeoJSON")
+            except Exception as e:
+                self._log(
+                    f"GeoPandas export failed, using fallback writer: {e}",
+                    error=False,
+                )
+                self._write_footprints_geojson_fallback(gdf, temp_file)
             self._temp_footprints_file = temp_file
 
             # Add layer to QGIS
             layer = QgsVectorLayer(temp_file, "NASA Earthdata Footprints", "ogr")
             if layer.isValid():
+                # GeoJSON footprints are WGS84 lon/lat. Set CRS explicitly so map
+                # transforms still work when GeoPandas could not attach CRS metadata.
+                layer.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
+
                 # Style the layer
                 from qgis.core import QgsFillSymbol, QgsSingleSymbolRenderer
 
@@ -1104,23 +1308,16 @@ class EarthdataDockWidget(QDockWidget):
             # Check if rows are selected in the table
             selected_rows = self.results_table.selectionModel().selectedRows()
 
-            # Clear any previous selection
-            self._footprints_layer.removeSelection()
-
             if selected_rows:
                 # Zoom to selected features only
-                indices = set(row.row() for row in selected_rows)
+                indices = set(self._get_selected_result_indices())
                 # Get bounding box of selected features from the GeoDataFrame
                 selected_gdf = self._search_gdf.iloc[list(indices)]
                 bounds = selected_gdf.total_bounds  # [minx, miny, maxx, maxy]
                 layer_extent = QgsRectangle(bounds[0], bounds[1], bounds[2], bounds[3])
 
                 # Highlight selected features in the layer
-                feature_ids = []
-                for i, feature in enumerate(self._footprints_layer.getFeatures()):
-                    if i in indices:
-                        feature_ids.append(feature.id())
-                self._footprints_layer.selectByIds(feature_ids)
+                self._sync_footprint_selection_from_table()
 
                 self._log(f"Zooming to {len(indices)} selected footprint(s)")
             else:
@@ -1224,6 +1421,73 @@ class EarthdataDockWidget(QDockWidget):
             self.cog_combo.clear()
             self.cog_combo.setEnabled(False)
 
+        self._sync_footprint_selection_from_table()
+
+    def _get_result_index_for_table_row(self, table_row):
+        """Map current table row (after sorting) to original search result index."""
+        item = self.results_table.item(table_row, 0)
+        if item is None:
+            return table_row
+
+        result_idx = item.data(Qt.UserRole)
+        if result_idx is None:
+            return table_row
+
+        try:
+            return int(result_idx)
+        except (TypeError, ValueError):
+            return table_row
+
+    def _get_selected_result_indices(self):
+        """Get stable result indices for the current table selection."""
+        selection_model = self.results_table.selectionModel()
+        if selection_model is None:
+            return []
+
+        indices = []
+        for row in selection_model.selectedRows():
+            result_idx = self._get_result_index_for_table_row(row.row())
+            if self._search_results is None or 0 <= result_idx < len(
+                self._search_results
+            ):
+                indices.append(result_idx)
+
+        # Preserve order while removing duplicates.
+        return list(dict.fromkeys(indices))
+
+    def _sync_footprint_selection_from_table(self):
+        """Highlight footprint features matching selected table rows."""
+        if self._footprints_layer is None or not self._footprints_layer.isValid():
+            return
+
+        try:
+            selected_indices = set(self._get_selected_result_indices())
+            self._footprints_layer.removeSelection()
+
+            if not selected_indices:
+                return
+
+            feature_ids = []
+            field_names = [f.name() for f in self._footprints_layer.fields()]
+            has_result_idx_field = "result_idx" in field_names
+
+            for feature_pos, feature in enumerate(self._footprints_layer.getFeatures()):
+                if has_result_idx_field:
+                    try:
+                        feature_result_idx = int(feature["result_idx"])
+                    except Exception:
+                        feature_result_idx = feature_pos
+                else:
+                    feature_result_idx = feature_pos
+
+                if feature_result_idx in selected_indices:
+                    feature_ids.append(feature.id())
+
+            if feature_ids:
+                self._footprints_layer.selectByIds(feature_ids)
+        except Exception as e:
+            self._log(f"Error syncing footprint selection: {e}", error=True)
+
     def _on_header_double_clicked(self, logical_index):
         """Handle double-click on table header to toggle sort order."""
         # Get current sort order for this column
@@ -1252,10 +1516,11 @@ class EarthdataDockWidget(QDockWidget):
         self.cog_combo.clear()
         self.cog_combo.setEnabled(False)
 
-        if self._search_results is None or row_index >= len(self._search_results):
+        result_index = self._get_result_index_for_table_row(row_index)
+        if self._search_results is None or result_index >= len(self._search_results):
             return
 
-        granule = self._search_results[row_index]
+        granule = self._search_results[result_index]
 
         try:
             # Get data links
@@ -1290,7 +1555,7 @@ class EarthdataDockWidget(QDockWidget):
         """Get the selected granules from the table."""
         selected_rows = self.results_table.selectionModel().selectedRows()
         if selected_rows and self._search_results:
-            indices = [row.row() for row in selected_rows]
+            indices = self._get_selected_result_indices()
             return [
                 self._search_results[i]
                 for i in indices
@@ -1327,16 +1592,53 @@ class EarthdataDockWidget(QDockWidget):
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
 
         # Start COG worker
+        auth_username, auth_password, auth_token = (
+            self._get_settings_input_credentials()
+        )
         if selected_cog_url:
             # Pass specific COG URL
-            self._cog_worker = COGDisplayWorker([], selected_cog_url=selected_cog_url)
+            self._cog_worker = COGDisplayWorker(
+                [],
+                selected_cog_url=selected_cog_url,
+                auth_username=auth_username,
+                auth_password=auth_password,
+                auth_token=auth_token,
+            )
         else:
             # Pass granules to find COGs
-            self._cog_worker = COGDisplayWorker(self._get_selected_granules())
+            self._cog_worker = COGDisplayWorker(
+                self._get_selected_granules(),
+                auth_username=auth_username,
+                auth_password=auth_password,
+                auth_token=auth_token,
+            )
         self._cog_worker.finished.connect(self._on_cog_finished)
         self._cog_worker.error.connect(self._on_cog_error)
         self._cog_worker.progress.connect(self._log)
         self._cog_worker.start()
+
+    def _get_settings_input_credentials(self):
+        """Read Earthdata credentials from the Settings dock inputs, if available."""
+        username = ""
+        password = ""
+        token = ""
+
+        try:
+            settings_dock = self.iface.mainWindow().findChild(
+                QDockWidget, "NASAEarthdataSettingsDock"
+            )
+            if settings_dock is not None:
+                if hasattr(settings_dock, "username_input"):
+                    username = settings_dock.username_input.text().strip()
+                if hasattr(settings_dock, "password_input"):
+                    password = settings_dock.password_input.text().strip()
+                # Future-proof if a token field is added later.
+                if hasattr(settings_dock, "token_input"):
+                    token = settings_dock.token_input.text().strip()
+        except Exception:
+            pass
+
+        return username, password, token
 
     def _on_cog_finished(self, results, cookie_file):
         """Handle COG display completion."""

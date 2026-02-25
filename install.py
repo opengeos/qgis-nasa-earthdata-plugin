@@ -158,9 +158,6 @@ def main():
             print("  2. Go to Plugins -> Manage and Install Plugins...")
             print(f"  3. Enable '{args.name}'")
             print()
-            print("IMPORTANT: You need to install the following Python packages:")
-            print("  pip install earthaccess geopandas")
-            print()
 
     sys.exit(0 if success else 1)
 

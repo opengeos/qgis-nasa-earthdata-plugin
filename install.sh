@@ -104,8 +104,5 @@ else
     echo "  2. Go to Plugins -> Manage and Install Plugins..."
     echo "  3. Enable '${PLUGIN_NAME}'"
     echo ""
-    echo "IMPORTANT: You need to install the following Python packages:"
-    echo "  pip install earthaccess geopandas"
-    echo ""
 fi
 
