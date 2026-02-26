@@ -30,6 +30,7 @@ class NASAEarthdata:
         # Dock widgets (lazy loaded)
         self._earthdata_dock = None
         self._settings_dock = None
+        self._deps_signal_connected = False
 
     def add_action(
         self,
@@ -195,6 +196,7 @@ class NASAEarthdata:
 
                 # Check dependencies on first open
                 self._check_dependencies_on_open()
+                self._connect_deps_signal()
                 return
 
             except Exception as e:
@@ -233,6 +235,7 @@ class NASAEarthdata:
                 self.iface.addDockWidget(Qt.RightDockWidgetArea, self._settings_dock)
                 self._settings_dock.show()
                 self._settings_dock.raise_()
+                self._connect_deps_signal()
                 return
 
             except Exception as e:
@@ -254,6 +257,18 @@ class NASAEarthdata:
     def _on_settings_visibility_changed(self, visible):
         """Handle Settings dock visibility change."""
         self.settings_action.setChecked(visible)
+
+    def _connect_deps_signal(self):
+        """Connect settings dock deps_installed signal to earthdata dock reload."""
+        if (
+            not self._deps_signal_connected
+            and self._settings_dock is not None
+            and self._earthdata_dock is not None
+        ):
+            self._settings_dock.deps_installed.connect(
+                self._earthdata_dock.reload_catalog
+            )
+            self._deps_signal_connected = True
 
     def _check_dependencies_on_open(self):
         """Check if required dependencies are installed and prompt if missing."""
@@ -297,6 +312,7 @@ class NASAEarthdata:
                     self._on_settings_visibility_changed
                 )
                 self.iface.addDockWidget(Qt.RightDockWidgetArea, self._settings_dock)
+                self._connect_deps_signal()
             except Exception as e:
                 QMessageBox.critical(
                     self.iface.mainWindow(),

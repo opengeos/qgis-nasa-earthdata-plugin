@@ -79,10 +79,65 @@ class NumericTableWidgetItem(QTableWidgetItem):
             return super().__lt__(other)
 
 
+class CatalogData:
+    """Lightweight catalog data wrapper using stdlib only.
+
+    Provides the interface the UI needs (name listing, keyword filtering,
+    title lookup) without requiring pandas or the plugin venv.
+    """
+
+    def __init__(self, rows):
+        """Initialize with a list of dicts (one per TSV row).
+
+        Args:
+            rows: List of dicts with at least 'ShortName' and 'EntryTitle' keys.
+        """
+        self._rows = rows
+
+    def get_short_names(self):
+        """Return a list of all ShortName values.
+
+        Returns:
+            List of ShortName strings.
+        """
+        return [r.get("ShortName", "") for r in self._rows]
+
+    def filter_by_keyword(self, keyword):
+        """Return ShortNames where keyword matches ShortName or EntryTitle.
+
+        Args:
+            keyword: Lowercase search string.
+
+        Returns:
+            List of matching ShortName strings.
+        """
+        result = []
+        for r in self._rows:
+            sn = r.get("ShortName", "")
+            et = r.get("EntryTitle", "")
+            if keyword in sn.lower() or keyword in et.lower():
+                result.append(sn)
+        return result
+
+    def get_title(self, short_name):
+        """Get the EntryTitle for a given ShortName.
+
+        Args:
+            short_name: The ShortName to look up.
+
+        Returns:
+            The EntryTitle string, or None if not found.
+        """
+        for r in self._rows:
+            if r.get("ShortName") == short_name:
+                return r.get("EntryTitle", "")
+        return None
+
+
 class CatalogLoadWorker(QThread):
     """Worker thread for loading the NASA Earthdata catalog."""
 
-    finished = pyqtSignal(object, list)  # dataframe, names list
+    finished = pyqtSignal(object, list)  # CatalogData, names list
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
@@ -93,14 +148,8 @@ class CatalogLoadWorker(QThread):
     def run(self):
         """Load the catalog from cache or download."""
         try:
-            from ..core.venv_manager import ensure_venv_packages_available
-
-            if not ensure_venv_packages_available():
-                raise RuntimeError(
-                    "Plugin Python dependencies are not installed. "
-                    "Open Settings and run 'Install Dependencies'."
-                )
-            import pandas as pd
+            import csv
+            import urllib.request
 
             # Ensure cache directory exists
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -116,15 +165,22 @@ class CatalogLoadWorker(QThread):
                     self.progress.emit("Loading catalog from cache...")
 
             if use_cache:
-                df = pd.read_csv(CATALOG_CACHE_FILE, sep="\t")
+                with open(CATALOG_CACHE_FILE, "r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f, delimiter="\t")
+                    rows = list(reader)
             else:
                 self.progress.emit("Downloading NASA Earthdata catalog...")
-                df = pd.read_csv(NASA_DATA_URL, sep="\t")
-                # Save to cache
-                df.to_csv(CATALOG_CACHE_FILE, sep="\t", index=False)
+                with urllib.request.urlopen(NASA_DATA_URL, timeout=30) as resp:
+                    text = resp.read().decode("utf-8")
+                # Save raw TSV to cache
+                with open(CATALOG_CACHE_FILE, "w", encoding="utf-8") as f:
+                    f.write(text)
+                reader = csv.DictReader(text.splitlines(), delimiter="\t")
+                rows = list(reader)
 
-            names = df["ShortName"].tolist()
-            self.finished.emit(df, names)
+            catalog = CatalogData(rows)
+            names = catalog.get_short_names()
+            self.finished.emit(catalog, names)
 
         except Exception as e:
             self.error.emit(str(e))
@@ -266,11 +322,14 @@ class DataSearchWorker(QThread):
 
 
 class COGDisplayWorker(QThread):
-    """Worker thread for displaying COG layers with authentication."""
+    """Worker thread for downloading and displaying COG layers.
 
-    finished = pyqtSignal(
-        list, str
-    )  # list of (layer_name, vsi_path, url) tuples, cookie_file
+    Downloads COG files via the earthaccess authenticated session to a temp
+    directory, then emits the local file paths for QGIS to load. This avoids
+    GDAL /vsicurl/ authentication issues with NASA's URS redirect flow.
+    """
+
+    finished = pyqtSignal(list)  # list of (layer_name, local_path) tuples
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
@@ -278,209 +337,156 @@ class COGDisplayWorker(QThread):
         self,
         granules,
         selected_cog_url=None,
-        auth_username=None,
-        auth_password=None,
-        auth_token=None,
+        username=None,
+        password=None,
         parent=None,
     ):
+        """Initialize the COG display worker.
+
+        Args:
+            granules: List of earthaccess granule objects.
+            selected_cog_url: Specific COG URL if provided.
+            username: Earthdata username from Settings input box.
+            password: Earthdata password from Settings input box.
+            parent: Parent QObject.
+        """
         super().__init__(parent)
         self.granules = granules
-        self.selected_cog_url = selected_cog_url  # Specific COG URL if provided
-        self.auth_username = (auth_username or "").strip()
-        self.auth_password = (auth_password or "").strip()
-        self.auth_token = (auth_token or "").strip()
+        self.selected_cog_url = selected_cog_url
+        self.username = (username or "").strip()
+        self.password = (password or "").strip()
 
-    def _has_env_credentials(self):
-        """Return True if current environment has usable Earthdata credentials."""
-        env_user = os.environ.get("EARTHDATA_USERNAME", "").strip()
-        env_pass = os.environ.get("EARTHDATA_PASSWORD", "").strip()
-        env_token = os.environ.get("EARTHDATA_TOKEN", "").strip()
-        return bool(env_token or (env_user and env_pass))
+    def _login(self, earthaccess):
+        """Authenticate with earthaccess using available credentials.
 
-    def _get_env_credentials(self):
-        """Read Earthdata credentials from current process environment."""
-        env_user = os.environ.get("EARTHDATA_USERNAME", "").strip()
-        env_pass = os.environ.get("EARTHDATA_PASSWORD", "").strip()
-        env_token = os.environ.get("EARTHDATA_TOKEN", "").strip()
-        return {"username": env_user, "password": env_pass, "token": env_token}
+        Tries .netrc, environment variables, and Settings input boxes in order.
 
-    def _get_netrc_credentials(self):
-        """Load credentials from ~/.netrc if present."""
-        netrc_path = os.path.expanduser("~/.netrc")
-        if not os.path.exists(netrc_path):
-            return None
+        Args:
+            earthaccess: The earthaccess module.
 
-        try:
-            import netrc
+        Returns:
+            True if authenticated, False otherwise.
+        """
+        # Prefer .netrc for persistent credentials, then environment vars.
+        for strategy in ("netrc", "environment"):
+            try:
+                auth = earthaccess.login(strategy=strategy, persist=True)
+                if getattr(auth, "authenticated", False):
+                    self.progress.emit(f"Authenticated via {strategy}")
+                    return True
+            except Exception:
+                continue
 
-            auth = netrc.netrc(netrc_path).authenticators("urs.earthdata.nasa.gov")
-            if not auth:
-                return None
+        # Try credentials from Settings input boxes
+        if self.username and self.password:
+            try:
+                os.environ["EARTHDATA_USERNAME"] = self.username
+                os.environ["EARTHDATA_PASSWORD"] = self.password
+                auth = earthaccess.login(strategy="environment", persist=True)
+                if getattr(auth, "authenticated", False):
+                    self.progress.emit("Authenticated via settings input")
+                    return True
+            except Exception:
+                pass
 
-            username, _, password = auth
-            if username and password:
-                return {"username": username, "password": password}
-        except Exception:
-            return None
-
-        return None
-
-    def _login_with_environment_strategy(
-        self, earthaccess, source_label, username=None, password=None, token=None
-    ):
-        """Authenticate using earthaccess environment strategy, optionally with temp creds."""
-        keys = ("EARTHDATA_USERNAME", "EARTHDATA_PASSWORD", "EARTHDATA_TOKEN")
-        original_env = {k: os.environ.get(k) for k in keys}
-
-        try:
-            # Clear all three first so each attempt uses only the intended source.
-            for key in keys:
-                os.environ.pop(key, None)
-
-            if token:
-                os.environ["EARTHDATA_TOKEN"] = token
-            elif username and password:
-                os.environ["EARTHDATA_USERNAME"] = username
-                os.environ["EARTHDATA_PASSWORD"] = password
-
-            self.progress.emit(
-                f"Authenticating with NASA Earthdata ({source_label})..."
-            )
-            auth = earthaccess.login(strategy="environment", persist=True)
-            if getattr(auth, "authenticated", False):
-                return auth, None
-            return None, f"Authentication failed using {source_label}"
-        except Exception as e:
-            return None, str(e)
-        finally:
-            # Restore original process environment to avoid side effects across attempts.
-            for key, value in original_env.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+        return False
 
     def run(self):
-        """Get authenticated URLs for COG files."""
+        """Authenticate, download COG files to temp dir, and emit paths."""
         try:
             from ..core.venv_manager import ensure_venv_packages_available
 
             ensure_venv_packages_available()
             import earthaccess
 
-            auth = None
-            auth_errors = []
-
-            # 1) ~/.netrc (preferred)
-            netrc_creds = self._get_netrc_credentials()
-            if netrc_creds:
-                auth, err = self._login_with_environment_strategy(
-                    earthaccess,
-                    ".netrc",
-                    username=netrc_creds.get("username"),
-                    password=netrc_creds.get("password"),
-                )
-                if err and auth is None:
-                    auth_errors.append(f".netrc: {err}")
-
-            # 2) Existing environment variables (EARTHDATA_* / token)
-            if auth is None and self._has_env_credentials():
-                env_creds = self._get_env_credentials()
-                auth, err = self._login_with_environment_strategy(
-                    earthaccess,
-                    "environment variables",
-                    username=env_creds.get("username"),
-                    password=env_creds.get("password"),
-                    token=env_creds.get("token"),
-                )
-                if err and auth is None:
-                    auth_errors.append(f"environment: {err}")
-
-            # 3) Credentials entered in plugin settings input boxes (if passed in)
-            if auth is None and (
-                self.auth_token or (self.auth_username and self.auth_password)
-            ):
-                auth, err = self._login_with_environment_strategy(
-                    earthaccess,
-                    "settings input",
-                    username=self.auth_username,
-                    password=self.auth_password,
-                    token=self.auth_token,
-                )
-                if err and auth is None:
-                    auth_errors.append(f"settings input: {err}")
-
-            if auth is None or not getattr(auth, "authenticated", False):
-                detail = f" ({'; '.join(auth_errors)})" if auth_errors else ""
+            self.progress.emit("Authenticating with NASA Earthdata...")
+            if not self._login(earthaccess):
                 self.error.emit(
-                    "NASA Earthdata authentication failed. Tried .netrc, environment "
-                    f"variables, then settings input.{detail}"
+                    "NASA Earthdata authentication failed.\n"
+                    "Please check your credentials in Settings."
                 )
                 return
 
-            # Get the authenticated session
-            session = earthaccess.get_requests_https_session()
-
-            # Set up cookie file for GDAL authentication
-            cookie_file = os.path.expanduser("~/.urs_cookies")
-
-            # Save cookies from the session to the cookie file in Netscape format
-            try:
-                with open(cookie_file, "w") as f:
-                    f.write("# Netscape HTTP Cookie File\n")
-                    f.write("# https://curl.se/docs/http-cookies.html\n")
-                    f.write("# This file was generated by NASA Earthdata plugin\n\n")
-                    for cookie in session.cookies:
-                        secure = "TRUE" if cookie.secure else "FALSE"
-                        expires = str(int(cookie.expires)) if cookie.expires else "0"
-                        f.write(
-                            f"{cookie.domain}\tTRUE\t{cookie.path}\t{secure}\t{expires}\t{cookie.name}\t{cookie.value}\n"
-                        )
-                self.progress.emit("Saved authentication cookies")
-            except Exception as e:
-                self.progress.emit(f"Warning: Could not save cookies: {e}")
-
-            results = []
-
-            # If a specific COG URL is provided, use that
+            # Collect COG URLs
+            cog_urls = []
             if self.selected_cog_url:
-                link = self.selected_cog_url
-                layer_name = os.path.basename(link).split("?")[0]
-                vsi_path = f"/vsicurl/{link}"
-                results.append((layer_name, vsi_path, link))
-                self.progress.emit(f"Using selected: {layer_name}")
+                cog_urls.append(self.selected_cog_url)
+                name = os.path.basename(self.selected_cog_url).split("?")[0]
+                self.progress.emit(f"Selected: {name}")
             else:
-                # Get COGs from granules
                 for granule in self.granules:
                     try:
-                        # Get HTTPS data links
                         try:
                             links = granule.data_links(access="external")
                         except TypeError:
                             links = granule.data_links()
 
-                        # Find COG/TIFF links (HTTPS only)
-                        cog_links = [
-                            link
-                            for link in links
-                            if any(ext in link.lower() for ext in [".tif", ".tiff"])
-                            and link.startswith("http")
-                        ]
-
-                        if not cog_links:
-                            continue
-
-                        # Use the first TIFF link
-                        for link in cog_links[:1]:
-                            layer_name = os.path.basename(link).split("?")[0]
-                            vsi_path = f"/vsicurl/{link}"
-                            results.append((layer_name, vsi_path, link))
-                            self.progress.emit(f"Found: {layer_name}")
-
+                        for link in links:
+                            if any(
+                                ext in link.lower() for ext in [".tif", ".tiff"]
+                            ) and link.startswith("http"):
+                                cog_urls.append(link)
+                                name = os.path.basename(link).split("?")[0]
+                                self.progress.emit(f"Found: {name}")
+                                break  # first TIFF per granule
                     except Exception as e:
                         self.progress.emit(f"Error processing granule: {e}")
 
-            self.finished.emit(results, cookie_file)
+            if not cog_urls:
+                self.finished.emit([])
+                return
+
+            # Download COG files using earthaccess authenticated session
+            session = earthaccess.get_requests_https_session()
+            temp_dir = os.path.join(tempfile.gettempdir(), "nasa_earthdata_cog_cache")
+            os.makedirs(temp_dir, exist_ok=True)
+
+            results = []
+            for i, url in enumerate(cog_urls, 1):
+                layer_name = os.path.basename(url).split("?")[0]
+                local_path = os.path.join(temp_dir, layer_name)
+
+                self.progress.emit(f"Downloading {layer_name}... ({i}/{len(cog_urls)})")
+                try:
+                    with session.get(url, stream=True, timeout=60) as resp:
+                        resp.raise_for_status()
+
+                        first_chunk = b""
+                        with open(local_path, "wb") as f:
+                            for chunk in resp.iter_content(chunk_size=65536):
+                                if not chunk:
+                                    continue
+                                if not first_chunk:
+                                    first_chunk = chunk
+                                f.write(chunk)
+
+                        # Guard against an HTML login/error page saved as .tif
+                        # when auth/redirect negotiation fails.
+                        tiff_magic = (
+                            b"II*\x00",
+                            b"MM\x00*",
+                            b"II+\x00",
+                            b"MM\x00+",
+                        )
+                        if first_chunk and not any(
+                            first_chunk.startswith(sig) for sig in tiff_magic
+                        ):
+                            content_type = resp.headers.get("Content-Type", "")
+                            try:
+                                os.remove(local_path)
+                            except OSError:
+                                pass
+                            raise ValueError(
+                                "Downloaded response is not a TIFF "
+                                f"(content-type: {content_type or 'unknown'})"
+                            )
+
+                    results.append((layer_name, local_path))
+                    self.progress.emit(f"Downloaded: {layer_name}")
+                except Exception as e:
+                    self.progress.emit(f"Error downloading {layer_name}: {e}")
+
+            self.finished.emit(results)
 
         except Exception as e:
             self.error.emit(str(e))
@@ -878,6 +884,10 @@ class EarthdataDockWidget(QDockWidget):
         self._catalog_worker.progress.connect(self._log)
         self._catalog_worker.start()
 
+    def reload_catalog(self):
+        """Reload the catalog, e.g. after dependencies are installed."""
+        self._load_datasets()
+
     def _on_catalog_loaded(self, df, names):
         """Handle catalog loaded."""
         self.refresh_catalog_btn.setEnabled(True)
@@ -931,12 +941,7 @@ class EarthdataDockWidget(QDockWidget):
         if self._nasa_data is None:
             return
 
-        # Filter datasets - only search in ShortName and EntryTitle columns
-        df = self._nasa_data
-        mask = df["ShortName"].str.lower().str.contains(keyword, na=False) | df[
-            "EntryTitle"
-        ].str.lower().str.contains(keyword, na=False)
-        filtered = df[mask]["ShortName"].tolist()
+        filtered = self._nasa_data.filter_by_keyword(keyword)
 
         self.dataset_combo.clear()
         self.dataset_combo.addItems(filtered)
@@ -949,10 +954,11 @@ class EarthdataDockWidget(QDockWidget):
             return
 
         try:
-            row = self._nasa_data[self._nasa_data["ShortName"] == short_name]
-            if not row.empty:
-                title = row["EntryTitle"].values[0]
+            title = self._nasa_data.get_title(short_name)
+            if title:
                 self.title_label.setText(title)
+            else:
+                self.title_label.clear()
         except Exception:
             self.title_label.clear()
 
@@ -1591,26 +1597,22 @@ class EarthdataDockWidget(QDockWidget):
         # Set wait cursor
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
 
+        # Read credentials from Settings input boxes as fallback
+        username, password = self._get_settings_input_credentials()
+
         # Start COG worker
-        auth_username, auth_password, auth_token = (
-            self._get_settings_input_credentials()
-        )
         if selected_cog_url:
-            # Pass specific COG URL
             self._cog_worker = COGDisplayWorker(
                 [],
                 selected_cog_url=selected_cog_url,
-                auth_username=auth_username,
-                auth_password=auth_password,
-                auth_token=auth_token,
+                username=username,
+                password=password,
             )
         else:
-            # Pass granules to find COGs
             self._cog_worker = COGDisplayWorker(
                 self._get_selected_granules(),
-                auth_username=auth_username,
-                auth_password=auth_password,
-                auth_token=auth_token,
+                username=username,
+                password=password,
             )
         self._cog_worker.finished.connect(self._on_cog_finished)
         self._cog_worker.error.connect(self._on_cog_error)
@@ -1618,11 +1620,13 @@ class EarthdataDockWidget(QDockWidget):
         self._cog_worker.start()
 
     def _get_settings_input_credentials(self):
-        """Read Earthdata credentials from the Settings dock inputs, if available."""
+        """Read Earthdata credentials from the Settings dock input boxes.
+
+        Returns:
+            Tuple of (username, password) strings. Empty strings if unavailable.
+        """
         username = ""
         password = ""
-        token = ""
-
         try:
             settings_dock = self.iface.mainWindow().findChild(
                 QDockWidget, "NASAEarthdataSettingsDock"
@@ -1632,16 +1636,18 @@ class EarthdataDockWidget(QDockWidget):
                     username = settings_dock.username_input.text().strip()
                 if hasattr(settings_dock, "password_input"):
                     password = settings_dock.password_input.text().strip()
-                # Future-proof if a token field is added later.
-                if hasattr(settings_dock, "token_input"):
-                    token = settings_dock.token_input.text().strip()
         except Exception:
             pass
+        return username, password
 
-        return username, password, token
+    def _on_cog_finished(self, results, cookie_file=None):
+        """Handle COG display completion.
 
-    def _on_cog_finished(self, results, cookie_file):
-        """Handle COG display completion."""
+        Args:
+            results: List of (layer_name, local_path) or legacy
+                (layer_name, vsi_path, url) tuples.
+            cookie_file: Optional cookie file for legacy /vsicurl loading.
+        """
         from osgeo import gdal
 
         # Keep wait cursor while loading layers
@@ -1660,29 +1666,52 @@ class EarthdataDockWidget(QDockWidget):
             )
             return
 
-        # Set up GDAL configuration for NASA Earthdata authentication
-        gdal.SetConfigOption("GDAL_HTTP_COOKIEFILE", cookie_file)
-        gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", cookie_file)
-        gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
-        gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF")
-        gdal.SetConfigOption("GDAL_HTTP_UNSAFESSL", "YES")
-        gdal.SetConfigOption("GDAL_HTTP_MAX_RETRY", "3")
-        gdal.SetConfigOption("VSI_CACHE", "TRUE")
-        gdal.SetConfigOption("VSI_CACHE_SIZE", "100000000")  # 100MB cache
+        using_vsicurl = any(
+            len(item) > 1
+            and isinstance(item[1], str)
+            and item[1].startswith("/vsicurl/")
+            for item in results
+        )
+        if using_vsicurl and cookie_file:
+            # Legacy path: configure GDAL auth for NASA Earthdata redirects.
+            gdal.SetConfigOption("GDAL_HTTP_COOKIEFILE", cookie_file)
+            gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", cookie_file)
+            netrc_path = os.path.expanduser("~/.netrc")
+            if os.path.exists(netrc_path):
+                gdal.SetConfigOption("GDAL_HTTP_NETRC", "YES")
+                gdal.SetConfigOption("GDAL_HTTP_NETRC_FILE", netrc_path)
+            gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+            gdal.SetConfigOption(
+                "CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF"
+            )
+            gdal.SetConfigOption("GDAL_HTTP_UNSAFESSL", "YES")
+            gdal.SetConfigOption("GDAL_HTTP_MAX_RETRY", "3")
+            gdal.SetConfigOption("VSI_CACHE", "TRUE")
+            gdal.SetConfigOption("VSI_CACHE_SIZE", "100000000")  # 100MB cache
 
         added_count = 0
         for item in results:
-            layer_name, vsi_path, original_url = (
-                item[0],
-                item[1],
-                item[2] if len(item) > 2 else item[1],
-            )
+            layer_name = item[0]
+            raster_path = item[1]
             try:
                 self._log(f"Loading: {layer_name}")
                 # Process events to update UI while loading
                 QApplication.processEvents()
-                layer = QgsRasterLayer(vsi_path, layer_name)
-                if layer.isValid():
+
+                # Use gdal.Open to get a detailed error message if it fails
+                gdal.PushErrorHandler("CPLQuietErrorHandler")
+                ds = gdal.Open(raster_path)
+                gdal_err = gdal.GetLastErrorMsg()
+                gdal.PopErrorHandler()
+
+                if ds is not None:
+                    ds = None  # Close dataset before QGIS opens it
+                    layer = QgsRasterLayer(raster_path, layer_name)
+                else:
+                    self._log(f"GDAL error: {gdal_err}", error=True)
+                    layer = None
+
+                if layer is not None and layer.isValid():
                     QgsProject.instance().addMapLayer(layer)
                     added_count += 1
                     self._log(f"Added layer: {layer_name}")
@@ -1706,8 +1735,8 @@ class EarthdataDockWidget(QDockWidget):
                 self,
                 "COG Display",
                 "Could not display COG files from the selected data.\n\n"
-                "NASA Earthdata COGs require authentication for streaming.\n"
-                "Try using the Download button to download the data first.",
+                "The authenticated COG request did not return a valid GeoTIFF.\n"
+                "Please verify NASA Earthdata credentials in Settings.",
             )
 
     def _on_cog_error(self, error_msg):

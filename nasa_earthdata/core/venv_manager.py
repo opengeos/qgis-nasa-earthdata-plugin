@@ -9,6 +9,7 @@ modifying QGIS's built-in Python environment.
 import importlib
 import importlib.metadata
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -18,8 +19,7 @@ from typing import Tuple, Optional, Callable, List
 from qgis.core import QgsMessageLog, Qgis
 
 CACHE_DIR = os.path.expanduser("~/.qgis_nasa_earthdata")
-PYTHON_VERSION = f"py{sys.version_info.major}.{sys.version_info.minor}"
-VENV_DIR = os.path.join(CACHE_DIR, f"venv_{PYTHON_VERSION}")
+VENV_DIR = os.path.join(CACHE_DIR, "venv")
 
 REQUIRED_PACKAGES = [
     ("earthaccess", ""),
@@ -75,16 +75,15 @@ def _get_clean_env_for_venv():
 def _get_subprocess_kwargs():
     """Get platform-specific subprocess kwargs.
 
+    On Windows, suppresses the console window that would otherwise pop up
+    for each subprocess invocation.
+
     Returns:
         A dict of keyword arguments for subprocess.run.
     """
-    kwargs = {}
-    if sys.platform == "win32":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = subprocess.SW_HIDE
-        kwargs["startupinfo"] = startupinfo
-    return kwargs
+    if platform.system() == "Windows":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -103,10 +102,18 @@ def get_venv_python_path(venv_dir=None):
     """
     if venv_dir is None:
         venv_dir = VENV_DIR
-    if sys.platform == "win32":
-        return os.path.join(venv_dir, "Scripts", "python.exe")
-    else:
-        return os.path.join(venv_dir, "bin", "python3")
+    if platform.system() == "Windows":
+        primary = os.path.join(venv_dir, "Scripts", "python.exe")
+        if os.path.isfile(primary):
+            return primary
+        fallback = os.path.join(venv_dir, "Scripts", "python3.exe")
+        if os.path.isfile(fallback):
+            return fallback
+        return primary  # Return expected path even if missing
+    path = os.path.join(venv_dir, "bin", "python3")
+    if os.path.isfile(path):
+        return path
+    return os.path.join(venv_dir, "bin", "python")
 
 
 def get_venv_pip_path(venv_dir=None):
@@ -120,10 +127,9 @@ def get_venv_pip_path(venv_dir=None):
     """
     if venv_dir is None:
         venv_dir = VENV_DIR
-    if sys.platform == "win32":
+    if platform.system() == "Windows":
         return os.path.join(venv_dir, "Scripts", "pip.exe")
-    else:
-        return os.path.join(venv_dir, "bin", "pip")
+    return os.path.join(venv_dir, "bin", "pip")
 
 
 def get_venv_site_packages(venv_dir=None):
@@ -133,28 +139,25 @@ def get_venv_site_packages(venv_dir=None):
         venv_dir: Optional venv directory path. Defaults to VENV_DIR.
 
     Returns:
-        The absolute path to the venv site-packages directory.
+        The path to the venv site-packages directory, or None if not found.
     """
     if venv_dir is None:
         venv_dir = VENV_DIR
 
-    if sys.platform == "win32":
-        return os.path.join(venv_dir, "Lib", "site-packages")
+    if platform.system() == "Windows":
+        sp = os.path.join(venv_dir, "Lib", "site-packages")
+        return sp if os.path.isdir(sp) else None
 
     # On Unix, detect the actual Python version directory in the venv
     lib_dir = os.path.join(venv_dir, "lib")
-    if os.path.exists(lib_dir):
-        for entry in os.listdir(lib_dir):
-            if entry.startswith("python") and os.path.isdir(
-                os.path.join(lib_dir, entry)
-            ):
-                site_packages = os.path.join(lib_dir, entry, "site-packages")
-                if os.path.exists(site_packages):
-                    return site_packages
-
-    # Fallback to QGIS Python version
-    py_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    return os.path.join(venv_dir, "lib", py_version, "site-packages")
+    if not os.path.isdir(lib_dir):
+        return None
+    for entry in sorted(os.listdir(lib_dir), reverse=True):
+        if entry.startswith("python"):
+            sp = os.path.join(lib_dir, entry, "site-packages")
+            if os.path.isdir(sp):
+                return sp
+    return None
 
 
 def venv_exists(venv_dir=None):
@@ -174,12 +177,81 @@ def venv_exists(venv_dir=None):
 # ---------------------------------------------------------------------------
 
 
+def _find_python_executable():
+    """Find a working Python executable for venv creation.
+
+    On QGIS Windows, sys.executable may point to qgis-bin.exe rather than
+    a Python interpreter.  This function searches for the actual Python
+    executable using multiple strategies.
+
+    Returns:
+        Path to a Python executable, or sys.executable as fallback.
+    """
+    if platform.system() != "Windows":
+        return sys.executable
+
+    # Strategy 1: Check if sys.executable is already Python
+    exe_name = os.path.basename(sys.executable).lower()
+    if exe_name in ("python.exe", "python3.exe"):
+        return sys.executable
+
+    # Strategy 2: Use sys._base_prefix to find the Python installation.
+    # On QGIS Windows, sys._base_prefix typically points to
+    # C:\Program Files\QGIS 3.x\apps\Python3x\
+    base_prefix = getattr(sys, "_base_prefix", None) or sys.prefix
+    python_in_prefix = os.path.join(base_prefix, "python.exe")
+    if os.path.isfile(python_in_prefix):
+        return python_in_prefix
+
+    # Strategy 3: Look for python.exe next to sys.executable
+    exe_dir = os.path.dirname(sys.executable)
+    for name in ("python.exe", "python3.exe"):
+        candidate = os.path.join(exe_dir, name)
+        if os.path.isfile(candidate):
+            return candidate
+
+    # Strategy 4: Walk up from sys.executable to find apps/Python3x/python.exe
+    # Typical QGIS layout: .../QGIS 3.x/bin/qgis-bin.exe
+    #                       .../QGIS 3.x/apps/Python3x/python.exe
+    parent = os.path.dirname(exe_dir)
+    apps_dir = os.path.join(parent, "apps")
+    if os.path.isdir(apps_dir):
+        best_candidate = None
+        best_version_num = -1
+        for entry in os.listdir(apps_dir):
+            lower_entry = entry.lower()
+            if not lower_entry.startswith("python"):
+                continue
+            suffix = lower_entry.removeprefix("python")
+            digits = "".join(ch for ch in suffix if ch.isdigit())
+            if not digits:
+                continue
+            try:
+                version_num = int(digits)
+            except ValueError:
+                continue
+            candidate = os.path.join(apps_dir, entry, "python.exe")
+            if os.path.isfile(candidate) and version_num > best_version_num:
+                best_version_num = version_num
+                best_candidate = candidate
+        if best_candidate:
+            return best_candidate
+
+    # Strategy 5: Use shutil.which as last resort
+    which_python = shutil.which("python")
+    if which_python:
+        return which_python
+
+    # Fallback: return sys.executable (may fail, but preserves current behavior)
+    return sys.executable
+
+
 def _get_system_python():
     """Get the path to the Python executable for creating venvs.
 
-    Uses the standalone Python downloaded by python_manager.
-    On Windows, falls back to QGIS's bundled Python if standalone
-    is unavailable.
+    Uses the standalone Python downloaded by python_manager if available.
+    On Windows, falls back to QGIS's bundled Python using multi-strategy
+    detection (handles qgis-bin.exe, apps/Python3x/, etc.).
 
     Returns:
         The path to a usable Python executable.
@@ -194,53 +266,20 @@ def _get_system_python():
         _log(f"Using standalone Python: {python_path}")
         return python_path
 
-    # On Windows, try QGIS's bundled Python as fallback
-    if sys.platform == "win32":
-        python_path = _get_qgis_python()
-        if python_path:
-            _log(
-                "Standalone Python unavailable, using QGIS Python fallback",
-                Qgis.Warning,
-            )
-            return python_path
+    # Fallback: find QGIS's bundled Python (critical on Windows where
+    # sys.executable may be qgis-bin.exe)
+    python_path = _find_python_executable()
+    if python_path and os.path.isfile(python_path):
+        _log(
+            f"Standalone Python unavailable, using system Python: {python_path}",
+            Qgis.Warning,
+        )
+        return python_path
 
     raise RuntimeError(
         "Python standalone not installed. "
         "Please click 'Install Dependencies' to download Python automatically."
     )
-
-
-def _get_qgis_python():
-    """Get the path to QGIS's bundled Python on Windows.
-
-    Returns:
-        The path to the Python executable, or None if not found.
-    """
-    if sys.platform != "win32":
-        return None
-
-    for name in ("python.exe", "python3.exe"):
-        python_path = os.path.join(sys.prefix, name)
-        if os.path.exists(python_path):
-            try:
-                env = os.environ.copy()
-                env["PYTHONIOENCODING"] = "utf-8"
-                kwargs = _get_subprocess_kwargs()
-                result = subprocess.run(
-                    [python_path, "-c", "import sys; print(sys.version)"],
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                    env=env,
-                    **kwargs,
-                )
-                if result.returncode == 0:
-                    _log(f"QGIS Python verified: {result.stdout.strip()}")
-                    return python_path
-            except Exception as e:
-                _log(f"QGIS Python verification error: {e}", Qgis.Warning)
-
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -740,11 +779,16 @@ def ensure_venv_packages_available():
         True if venv packages are available, False otherwise.
     """
     if not venv_exists():
+        python_path = get_venv_python_path()
+        _log(
+            f"Venv does not exist: expected Python at {python_path}",
+            Qgis.Warning,
+        )
         return False
 
     site_packages = get_venv_site_packages()
-    if not os.path.exists(site_packages):
-        _log(f"Venv site-packages not found: {site_packages}", Qgis.Warning)
+    if site_packages is None:
+        _log(f"Venv site-packages not found in: {VENV_DIR}", Qgis.Warning)
         return False
 
     if site_packages not in sys.path:
@@ -781,20 +825,16 @@ def get_venv_status():
 
     # Quick filesystem check for packages
     site_packages = get_venv_site_packages()
-    if not os.path.exists(site_packages):
+    if site_packages is None:
         return False, "Virtual environment incomplete"
 
     for package_name, _ in REQUIRED_PACKAGES:
         pkg_dir = os.path.join(site_packages, package_name)
         dist_info_pattern = package_name.replace("-", "_")
         has_pkg = os.path.exists(pkg_dir)
-        has_dist = (
-            any(
-                entry.startswith(dist_info_pattern) and entry.endswith(".dist-info")
-                for entry in os.listdir(site_packages)
-            )
-            if os.path.exists(site_packages)
-            else False
+        has_dist = any(
+            entry.startswith(dist_info_pattern) and entry.endswith(".dist-info")
+            for entry in os.listdir(site_packages)
         )
 
         if not has_pkg and not has_dist:
@@ -871,10 +911,12 @@ def create_venv_and_install(progress_callback=None, cancel_check=None):
         )
 
         if not success:
-            # Windows fallback: try QGIS Python
-            if sys.platform == "win32" and _get_qgis_python():
+            # Fallback: use QGIS's bundled Python (critical on Windows
+            # where sys.executable may be qgis-bin.exe)
+            fallback = _find_python_executable()
+            if fallback and os.path.isfile(fallback):
                 _log(
-                    "Standalone download failed, using QGIS Python fallback",
+                    f"Standalone download failed, using system Python: {fallback}",
                     Qgis.Warning,
                 )
             else:
@@ -944,12 +986,14 @@ def create_venv_and_install(progress_callback=None, cancel_check=None):
 
 
 def cleanup_old_venv_directories():
-    """Remove old venv directories from previous Python versions.
+    """Remove old versioned venv directories (venv_py3.x) from previous layout.
+
+    The plugin now uses a single ``venv/`` directory.  This helper removes
+    leftover ``venv_py*`` directories created by earlier versions.
 
     Returns:
         A list of removed directory paths.
     """
-    current_venv_name = f"venv_{PYTHON_VERSION}"
     removed = []
 
     if not os.path.exists(CACHE_DIR):
@@ -957,9 +1001,7 @@ def cleanup_old_venv_directories():
 
     try:
         for entry in os.listdir(CACHE_DIR):
-            entry_lower = entry.lower()
-            current_lower = current_venv_name.lower()
-            if entry_lower.startswith("venv_py") and entry_lower != current_lower:
+            if entry.lower().startswith("venv_py"):
                 old_path = os.path.join(CACHE_DIR, entry)
                 if os.path.isdir(old_path):
                     try:
@@ -967,7 +1009,10 @@ def cleanup_old_venv_directories():
                         _log(f"Cleaned up old venv: {old_path}")
                         removed.append(old_path)
                     except Exception as e:
-                        _log(f"Failed to remove old venv {old_path}: {e}", Qgis.Warning)
+                        _log(
+                            f"Failed to remove old venv {old_path}: {e}",
+                            Qgis.Warning,
+                        )
     except Exception as e:
         _log(f"Error scanning for old venvs: {e}", Qgis.Warning)
 
