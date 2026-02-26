@@ -6,6 +6,7 @@ credentials and plugin preferences.
 """
 
 import os
+import platform
 from pathlib import Path
 
 from qgis.PyQt.QtCore import Qt, QSettings, pyqtSignal
@@ -502,8 +503,8 @@ class SettingsDockWidget(QDockWidget):
             os.environ["EARTHDATA_USERNAME"] = username
             os.environ["EARTHDATA_PASSWORD"] = password
 
-            # Try to authenticate
-            auth = earthaccess.login(strategy="environment", persist=False)
+            # Try to authenticate (persist=True writes to .netrc as well)
+            auth = earthaccess.login(strategy="environment", persist=True)
 
             if auth.authenticated:
                 # Save credentials to .netrc file for persistent authentication
@@ -568,9 +569,10 @@ class SettingsDockWidget(QDockWidget):
                 f.write(earthdata_entry)
 
             # Set proper permissions (readable/writable only by owner)
-            import stat
+            if platform.system() != "Windows":
+                import stat
 
-            os.chmod(netrc_path, stat.S_IRUSR | stat.S_IWUSR)
+                os.chmod(netrc_path, stat.S_IRUSR | stat.S_IWUSR)
 
         except Exception as e:
             raise Exception(f"Failed to save .netrc: {e}")
