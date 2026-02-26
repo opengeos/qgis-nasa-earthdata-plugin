@@ -321,123 +321,102 @@ class DataSearchWorker(QThread):
         return gdf
 
 
-def _earthdata_login():
-    """Authenticate with NASA Earthdata using non-interactive strategies.
-
-    Tries "environment" then "netrc" strategies, matching the approach used
-    by the NASA OPERA plugin.
-
-    Raises:
-        RuntimeError: If authentication fails (credentials not configured).
-    """
-    import earthaccess
-
-    for strategy in ("environment", "netrc"):
-        try:
-            auth = earthaccess.login(strategy=strategy)
-            if auth:
-                return
-        except Exception:
-            continue
-
-    raise RuntimeError(
-        "NASA Earthdata authentication failed.\n\n"
-        "Please open the Settings tab and enter your Earthdata username "
-        "and password, then click 'Test Credentials'."
-    )
-
-
-def setup_gdal_for_earthdata():
-    """Configure GDAL environment for accessing NASA Earthdata via S3.
-
-    Authenticates with earthaccess, obtains temporary S3 credentials, and
-    configures GDAL so /vsicurl/ and /vsis3/ can stream COGs. This matches
-    the approach used by the NASA OPERA plugin.
-
-    Returns:
-        Tuple of (success, error_message). error_message is None on success.
-    """
-    try:
-        from ..core.venv_manager import ensure_venv_packages_available
-
-        ensure_venv_packages_available()
-        import earthaccess
-        from osgeo import gdal
-
-        # Authenticate and get S3 credentials
-        _earthdata_login()
-        s3_credentials = earthaccess.get_s3_credentials(daac="PODAAC")
-
-        # Configure GDAL for S3 access
-        gdal.SetConfigOption("AWS_ACCESS_KEY_ID", s3_credentials["accessKeyId"])
-        gdal.SetConfigOption("AWS_SECRET_ACCESS_KEY", s3_credentials["secretAccessKey"])
-        gdal.SetConfigOption("AWS_SESSION_TOKEN", s3_credentials["sessionToken"])
-        gdal.SetConfigOption("AWS_REGION", "us-west-2")
-        gdal.SetConfigOption("AWS_S3_ENDPOINT", "s3.us-west-2.amazonaws.com")
-        gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
-        gdal.SetConfigOption(
-            "CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.TIF,.tiff,.TIFF"
-        )
-        gdal.SetConfigOption("GDAL_HTTP_UNSAFESSL", "YES")
-        gdal.SetConfigOption(
-            "GDAL_HTTP_COOKIEFILE", os.path.expanduser("~/cookies.txt")
-        )
-        gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", os.path.expanduser("~/cookies.txt"))
-
-        return True, None
-
-    except Exception as e:
-        return False, str(e)
-
-
-def get_vsicurl_path(url):
-    """Convert an S3 or HTTPS URL to a GDAL virtual filesystem path.
-
-    Args:
-        url: The S3 or HTTPS URL to the file.
-
-    Returns:
-        The /vsis3/ or /vsicurl/ path for GDAL.
-    """
-    if url.startswith("s3://"):
-        return f"/vsis3/{url[5:]}"
-    elif url.startswith("https://") or url.startswith("http://"):
-        return f"/vsicurl/{url}"
-    return url
-
-
 class COGDisplayWorker(QThread):
     """Worker thread for displaying COG layers with authentication."""
 
-    finished = pyqtSignal(list)  # list of (layer_name, vsi_path, url) tuples
+    finished = pyqtSignal(
+        list, str
+    )  # list of (layer_name, vsi_path, url) tuples, cookie_file
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, granules, selected_cog_url=None, parent=None):
+    def __init__(
+        self,
+        granules,
+        selected_cog_url=None,
+        username=None,
+        password=None,
+        parent=None,
+    ):
         """Initialize the COG display worker.
 
         Args:
             granules: List of earthaccess granule objects.
             selected_cog_url: Specific COG URL if provided.
+            username: Earthdata username from Settings input box.
+            password: Earthdata password from Settings input box.
             parent: Parent QObject.
         """
         super().__init__(parent)
         self.granules = granules
         self.selected_cog_url = selected_cog_url
+        self.username = (username or "").strip()
+        self.password = (password or "").strip()
 
     def run(self):
-        """Authenticate, configure GDAL, and collect COG URLs."""
+        """Get authenticated URLs for COG files."""
         try:
+            from ..core.venv_manager import ensure_venv_packages_available
+
+            ensure_venv_packages_available()
+            import earthaccess
+
             self.progress.emit("Authenticating with NASA Earthdata...")
-            success, error = setup_gdal_for_earthdata()
-            if not success:
+
+            # Try authentication strategies: environment vars, then netrc
+            auth = None
+            for strategy in ("environment", "netrc"):
+                try:
+                    auth = earthaccess.login(strategy=strategy, persist=True)
+                    if getattr(auth, "authenticated", False):
+                        self.progress.emit(f"Authenticated via {strategy}")
+                        break
+                except Exception:
+                    continue
+
+            # If standard strategies failed, try credentials from Settings input
+            if (auth is None or not getattr(auth, "authenticated", False)) and (
+                self.username and self.password
+            ):
+                try:
+                    os.environ["EARTHDATA_USERNAME"] = self.username
+                    os.environ["EARTHDATA_PASSWORD"] = self.password
+                    auth = earthaccess.login(strategy="environment", persist=True)
+                    if getattr(auth, "authenticated", False):
+                        self.progress.emit("Authenticated via settings input")
+                except Exception:
+                    pass
+
+            if auth is None or not getattr(auth, "authenticated", False):
                 self.error.emit(
-                    f"NASA Earthdata authentication failed: {error}\n\n"
+                    "NASA Earthdata authentication failed.\n"
                     "Please check your credentials in Settings."
                 )
                 return
 
-            self.progress.emit("Authentication successful")
+            # Get the authenticated session
+            session = earthaccess.get_requests_https_session()
+
+            # Set up cookie file for GDAL authentication
+            cookie_file = os.path.expanduser("~/.urs_cookies")
+
+            # Save cookies from the session to the cookie file in Netscape format
+            try:
+                with open(cookie_file, "w") as f:
+                    f.write("# Netscape HTTP Cookie File\n")
+                    f.write("# https://curl.se/docs/http-cookies.html\n")
+                    f.write("# Generated by NASA Earthdata plugin\n\n")
+                    for cookie in session.cookies:
+                        secure = "TRUE" if cookie.secure else "FALSE"
+                        expires = str(int(cookie.expires)) if cookie.expires else "0"
+                        f.write(
+                            f"{cookie.domain}\tTRUE\t{cookie.path}\t"
+                            f"{secure}\t{expires}\t"
+                            f"{cookie.name}\t{cookie.value}\n"
+                        )
+                self.progress.emit("Saved authentication cookies")
+            except Exception as e:
+                self.progress.emit(f"Warning: Could not save cookies: {e}")
 
             results = []
 
@@ -445,7 +424,7 @@ class COGDisplayWorker(QThread):
             if self.selected_cog_url:
                 link = self.selected_cog_url
                 layer_name = os.path.basename(link).split("?")[0]
-                vsi_path = get_vsicurl_path(link)
+                vsi_path = f"/vsicurl/{link}"
                 results.append((layer_name, vsi_path, link))
                 self.progress.emit(f"Using selected: {layer_name}")
             else:
@@ -458,11 +437,12 @@ class COGDisplayWorker(QThread):
                         except TypeError:
                             links = granule.data_links()
 
-                        # Find COG/TIFF links
+                        # Find COG/TIFF links (HTTPS only)
                         cog_links = [
                             link
                             for link in links
                             if any(ext in link.lower() for ext in [".tif", ".tiff"])
+                            and link.startswith("http")
                         ]
 
                         if not cog_links:
@@ -471,14 +451,14 @@ class COGDisplayWorker(QThread):
                         # Use the first TIFF link
                         for link in cog_links[:1]:
                             layer_name = os.path.basename(link).split("?")[0]
-                            vsi_path = get_vsicurl_path(link)
+                            vsi_path = f"/vsicurl/{link}"
                             results.append((layer_name, vsi_path, link))
                             self.progress.emit(f"Found: {layer_name}")
 
                     except Exception as e:
                         self.progress.emit(f"Error processing granule: {e}")
 
-            self.finished.emit(results)
+            self.finished.emit(results, cookie_file)
 
         except Exception as e:
             self.error.emit(str(e))
@@ -1589,22 +1569,58 @@ class EarthdataDockWidget(QDockWidget):
         # Set wait cursor
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
 
+        # Read credentials from Settings input boxes as fallback
+        username, password = self._get_settings_input_credentials()
+
         # Start COG worker
         if selected_cog_url:
-            self._cog_worker = COGDisplayWorker([], selected_cog_url=selected_cog_url)
+            self._cog_worker = COGDisplayWorker(
+                [],
+                selected_cog_url=selected_cog_url,
+                username=username,
+                password=password,
+            )
         else:
-            self._cog_worker = COGDisplayWorker(self._get_selected_granules())
+            self._cog_worker = COGDisplayWorker(
+                self._get_selected_granules(),
+                username=username,
+                password=password,
+            )
         self._cog_worker.finished.connect(self._on_cog_finished)
         self._cog_worker.error.connect(self._on_cog_error)
         self._cog_worker.progress.connect(self._log)
         self._cog_worker.start()
 
-    def _on_cog_finished(self, results):
+    def _get_settings_input_credentials(self):
+        """Read Earthdata credentials from the Settings dock input boxes.
+
+        Returns:
+            Tuple of (username, password) strings. Empty strings if unavailable.
+        """
+        username = ""
+        password = ""
+        try:
+            settings_dock = self.iface.mainWindow().findChild(
+                QDockWidget, "NASAEarthdataSettingsDock"
+            )
+            if settings_dock is not None:
+                if hasattr(settings_dock, "username_input"):
+                    username = settings_dock.username_input.text().strip()
+                if hasattr(settings_dock, "password_input"):
+                    password = settings_dock.password_input.text().strip()
+        except Exception:
+            pass
+        return username, password
+
+    def _on_cog_finished(self, results, cookie_file):
         """Handle COG display completion.
 
         Args:
             results: List of (layer_name, vsi_path, url) tuples.
+            cookie_file: Path to the cookie file for GDAL authentication.
         """
+        from osgeo import gdal
+
         # Keep wait cursor while loading layers
         self.progress_bar.setVisible(False)
 
@@ -1621,7 +1637,16 @@ class EarthdataDockWidget(QDockWidget):
             )
             return
 
-        # GDAL config was already set by setup_gdal_for_earthdata() in the worker
+        # Set up GDAL configuration for NASA Earthdata authentication
+        gdal.SetConfigOption("GDAL_HTTP_COOKIEFILE", cookie_file)
+        gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", cookie_file)
+        gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+        gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF")
+        gdal.SetConfigOption("GDAL_HTTP_UNSAFESSL", "YES")
+        gdal.SetConfigOption("GDAL_HTTP_MAX_RETRY", "3")
+        gdal.SetConfigOption("VSI_CACHE", "TRUE")
+        gdal.SetConfigOption("VSI_CACHE_SIZE", "100000000")  # 100MB cache
+
         added_count = 0
         for item in results:
             layer_name, vsi_path, original_url = (
