@@ -322,11 +322,14 @@ class DataSearchWorker(QThread):
 
 
 class COGDisplayWorker(QThread):
-    """Worker thread for displaying COG layers with authentication."""
+    """Worker thread for downloading and displaying COG layers.
 
-    finished = pyqtSignal(
-        list, str
-    )  # list of (layer_name, vsi_path, url) tuples, cookie_file
+    Downloads COG files via the earthaccess authenticated session to a temp
+    directory, then emits the local file paths for QGIS to load. This avoids
+    GDAL /vsicurl/ authentication issues with NASA's URS redirect flow.
+    """
+
+    finished = pyqtSignal(list)  # list of (layer_name, local_path) tuples
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
@@ -353,8 +356,43 @@ class COGDisplayWorker(QThread):
         self.username = (username or "").strip()
         self.password = (password or "").strip()
 
+    def _login(self, earthaccess):
+        """Authenticate with earthaccess using available credentials.
+
+        Tries environment variables, .netrc, and Settings input boxes in order.
+
+        Args:
+            earthaccess: The earthaccess module.
+
+        Returns:
+            True if authenticated, False otherwise.
+        """
+        # Try environment vars and .netrc
+        for strategy in ("environment", "netrc"):
+            try:
+                auth = earthaccess.login(strategy=strategy, persist=True)
+                if getattr(auth, "authenticated", False):
+                    self.progress.emit(f"Authenticated via {strategy}")
+                    return True
+            except Exception:
+                continue
+
+        # Try credentials from Settings input boxes
+        if self.username and self.password:
+            try:
+                os.environ["EARTHDATA_USERNAME"] = self.username
+                os.environ["EARTHDATA_PASSWORD"] = self.password
+                auth = earthaccess.login(strategy="environment", persist=True)
+                if getattr(auth, "authenticated", False):
+                    self.progress.emit("Authenticated via settings input")
+                    return True
+            except Exception:
+                pass
+
+        return False
+
     def run(self):
-        """Get authenticated URLs for COG files."""
+        """Authenticate, download COG files to temp dir, and emit paths."""
         try:
             from ..core.venv_manager import ensure_venv_packages_available
 
@@ -362,47 +400,19 @@ class COGDisplayWorker(QThread):
             import earthaccess
 
             self.progress.emit("Authenticating with NASA Earthdata...")
-
-            # Try authentication strategies: environment vars, then netrc
-            auth = None
-            for strategy in ("environment", "netrc"):
-                try:
-                    auth = earthaccess.login(strategy=strategy, persist=True)
-                    if getattr(auth, "authenticated", False):
-                        self.progress.emit(f"Authenticated via {strategy}")
-                        break
-                except Exception:
-                    continue
-
-            # If standard strategies failed, try credentials from Settings input
-            if (auth is None or not getattr(auth, "authenticated", False)) and (
-                self.username and self.password
-            ):
-                try:
-                    os.environ["EARTHDATA_USERNAME"] = self.username
-                    os.environ["EARTHDATA_PASSWORD"] = self.password
-                    auth = earthaccess.login(strategy="environment", persist=True)
-                    if getattr(auth, "authenticated", False):
-                        self.progress.emit("Authenticated via settings input")
-                except Exception:
-                    pass
-
-            if auth is None or not getattr(auth, "authenticated", False):
+            if not self._login(earthaccess):
                 self.error.emit(
                     "NASA Earthdata authentication failed.\n"
                     "Please check your credentials in Settings."
                 )
                 return
 
-            # Collect COG URLs first (before making any HTTP requests)
-            results = []
-
+            # Collect COG URLs
+            cog_urls = []
             if self.selected_cog_url:
-                link = self.selected_cog_url
-                layer_name = os.path.basename(link).split("?")[0]
-                vsi_path = f"/vsicurl/{link}"
-                results.append((layer_name, vsi_path, link))
-                self.progress.emit(f"Using selected: {layer_name}")
+                cog_urls.append(self.selected_cog_url)
+                name = os.path.basename(self.selected_cog_url).split("?")[0]
+                self.progress.emit(f"Selected: {name}")
             else:
                 for granule in self.granules:
                     try:
@@ -411,64 +421,78 @@ class COGDisplayWorker(QThread):
                         except TypeError:
                             links = granule.data_links()
 
-                        cog_links = [
-                            link
-                            for link in links
-                            if any(ext in link.lower() for ext in [".tif", ".tiff"])
-                            and link.startswith("http")
-                        ]
-
-                        if not cog_links:
-                            continue
-
-                        for link in cog_links[:1]:
-                            layer_name = os.path.basename(link).split("?")[0]
-                            vsi_path = f"/vsicurl/{link}"
-                            results.append((layer_name, vsi_path, link))
-                            self.progress.emit(f"Found: {layer_name}")
-
+                        for link in links:
+                            if any(
+                                ext in link.lower() for ext in [".tif", ".tiff"]
+                            ) and link.startswith("http"):
+                                cog_urls.append(link)
+                                name = os.path.basename(link).split("?")[0]
+                                self.progress.emit(f"Found: {name}")
+                                break  # first TIFF per granule
                     except Exception as e:
                         self.progress.emit(f"Error processing granule: {e}")
 
-            if not results:
-                self.finished.emit([], "")
+            if not cog_urls:
+                self.finished.emit([])
                 return
 
-            # Get the authenticated session and make a HEAD request to the
-            # first COG URL. This triggers the URS OAuth redirect flow and
-            # populates the session with authentication cookies. Without this,
-            # the session has auth handlers but NO cookies, and the cookie
-            # file written below would be empty.
+            # Download COG files using earthaccess authenticated session
             session = earthaccess.get_requests_https_session()
-            first_url = results[0][2]
-            self.progress.emit("Acquiring authentication cookies...")
-            try:
-                session.head(first_url, allow_redirects=True, timeout=30)
-            except Exception as e:
-                self.progress.emit(f"Warning: HEAD request failed: {e}")
+            temp_dir = os.path.join(
+                tempfile.gettempdir(), "nasa_earthdata_cog_cache"
+            )
+            os.makedirs(temp_dir, exist_ok=True)
 
-            # Now write the populated cookies to a Netscape cookie file
-            cookie_file = os.path.expanduser("~/.urs_cookies")
-            cookie_count = 0
-            try:
-                with open(cookie_file, "w") as f:
-                    f.write("# Netscape HTTP Cookie File\n")
-                    f.write("# https://curl.se/docs/http-cookies.html\n")
-                    f.write("# Generated by NASA Earthdata plugin\n\n")
-                    for cookie in session.cookies:
-                        secure = "TRUE" if cookie.secure else "FALSE"
-                        expires = str(int(cookie.expires)) if cookie.expires else "0"
-                        f.write(
-                            f"{cookie.domain}\tTRUE\t{cookie.path}\t"
-                            f"{secure}\t{expires}\t"
-                            f"{cookie.name}\t{cookie.value}\n"
+            results = []
+            for i, url in enumerate(cog_urls, 1):
+                layer_name = os.path.basename(url).split("?")[0]
+                local_path = os.path.join(temp_dir, layer_name)
+
+                self.progress.emit(
+                    f"Downloading {layer_name}... ({i}/{len(cog_urls)})"
+                )
+                try:
+                    with session.get(url, stream=True, timeout=60) as resp:
+                        resp.raise_for_status()
+
+                        first_chunk = b""
+                        with open(local_path, "wb") as f:
+                            for chunk in resp.iter_content(chunk_size=65536):
+                                if not chunk:
+                                    continue
+                                if not first_chunk:
+                                    first_chunk = chunk
+                                f.write(chunk)
+
+                        # Guard against an HTML login/error page saved as .tif
+                        # when auth/redirect negotiation fails.
+                        tiff_magic = (
+                            b"II*\x00",
+                            b"MM\x00*",
+                            b"II+\x00",
+                            b"MM\x00+",
                         )
-                        cookie_count += 1
-                self.progress.emit(f"Saved {cookie_count} authentication cookies")
-            except Exception as e:
-                self.progress.emit(f"Warning: Could not save cookies: {e}")
+                        if first_chunk and not any(
+                            first_chunk.startswith(sig) for sig in tiff_magic
+                        ):
+                            content_type = resp.headers.get("Content-Type", "")
+                            try:
+                                os.remove(local_path)
+                            except OSError:
+                                pass
+                            raise ValueError(
+                                "Downloaded response is not a TIFF "
+                                f"(content-type: {content_type or 'unknown'})"
+                            )
 
-            self.finished.emit(results, cookie_file)
+                    results.append((layer_name, local_path))
+                    self.progress.emit(f"Downloaded: {layer_name}")
+                except Exception as e:
+                    self.progress.emit(
+                        f"Error downloading {layer_name}: {e}"
+                    )
+
+            self.finished.emit(results)
 
         except Exception as e:
             self.error.emit(str(e))
@@ -1622,12 +1646,13 @@ class EarthdataDockWidget(QDockWidget):
             pass
         return username, password
 
-    def _on_cog_finished(self, results, cookie_file):
+    def _on_cog_finished(self, results, cookie_file=None):
         """Handle COG display completion.
 
         Args:
-            results: List of (layer_name, vsi_path, url) tuples.
-            cookie_file: Path to the cookie file for GDAL authentication.
+            results: List of (layer_name, local_path) or legacy
+                (layer_name, vsi_path, url) tuples.
+            cookie_file: Optional cookie file for legacy /vsicurl loading.
         """
         from osgeo import gdal
 
@@ -1647,29 +1672,31 @@ class EarthdataDockWidget(QDockWidget):
             )
             return
 
-        # Set up GDAL configuration for NASA Earthdata authentication.
-        # Use cookies (populated by a HEAD request in the worker) as primary
-        # auth, and .netrc as backup for GDAL's own redirect handling.
-        gdal.SetConfigOption("GDAL_HTTP_COOKIEFILE", cookie_file)
-        gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", cookie_file)
-        netrc_path = os.path.expanduser("~/.netrc")
-        if os.path.exists(netrc_path):
-            gdal.SetConfigOption("GDAL_HTTP_NETRC", "YES")
-            gdal.SetConfigOption("GDAL_HTTP_NETRC_FILE", netrc_path)
-        gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
-        gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF")
-        gdal.SetConfigOption("GDAL_HTTP_UNSAFESSL", "YES")
-        gdal.SetConfigOption("GDAL_HTTP_MAX_RETRY", "3")
-        gdal.SetConfigOption("VSI_CACHE", "TRUE")
-        gdal.SetConfigOption("VSI_CACHE_SIZE", "100000000")  # 100MB cache
+        using_vsicurl = any(
+            len(item) > 1 and isinstance(item[1], str) and item[1].startswith("/vsicurl/")
+            for item in results
+        )
+        if using_vsicurl and cookie_file:
+            # Legacy path: configure GDAL auth for NASA Earthdata redirects.
+            gdal.SetConfigOption("GDAL_HTTP_COOKIEFILE", cookie_file)
+            gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", cookie_file)
+            netrc_path = os.path.expanduser("~/.netrc")
+            if os.path.exists(netrc_path):
+                gdal.SetConfigOption("GDAL_HTTP_NETRC", "YES")
+                gdal.SetConfigOption("GDAL_HTTP_NETRC_FILE", netrc_path)
+            gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+            gdal.SetConfigOption(
+                "CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF"
+            )
+            gdal.SetConfigOption("GDAL_HTTP_UNSAFESSL", "YES")
+            gdal.SetConfigOption("GDAL_HTTP_MAX_RETRY", "3")
+            gdal.SetConfigOption("VSI_CACHE", "TRUE")
+            gdal.SetConfigOption("VSI_CACHE_SIZE", "100000000")  # 100MB cache
 
         added_count = 0
         for item in results:
-            layer_name, vsi_path, original_url = (
-                item[0],
-                item[1],
-                item[2] if len(item) > 2 else item[1],
-            )
+            layer_name = item[0]
+            raster_path = item[1]
             try:
                 self._log(f"Loading: {layer_name}")
                 # Process events to update UI while loading
@@ -1677,13 +1704,13 @@ class EarthdataDockWidget(QDockWidget):
 
                 # Use gdal.Open to get a detailed error message if it fails
                 gdal.PushErrorHandler("CPLQuietErrorHandler")
-                ds = gdal.Open(vsi_path)
+                ds = gdal.Open(raster_path)
                 gdal_err = gdal.GetLastErrorMsg()
                 gdal.PopErrorHandler()
 
                 if ds is not None:
                     ds = None  # Close dataset before QGIS opens it
-                    layer = QgsRasterLayer(vsi_path, layer_name)
+                    layer = QgsRasterLayer(raster_path, layer_name)
                 else:
                     self._log(f"GDAL error: {gdal_err}", error=True)
                     layer = None
@@ -1712,8 +1739,8 @@ class EarthdataDockWidget(QDockWidget):
                 self,
                 "COG Display",
                 "Could not display COG files from the selected data.\n\n"
-                "NASA Earthdata COGs require authentication for streaming.\n"
-                "Try using the Download button to download the data first.",
+                "The authenticated COG request did not return a valid GeoTIFF.\n"
+                "Please verify NASA Earthdata credentials in Settings.",
             )
 
     def _on_cog_error(self, error_msg):
