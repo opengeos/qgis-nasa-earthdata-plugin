@@ -394,13 +394,62 @@ class COGDisplayWorker(QThread):
                 )
                 return
 
-            # Get the authenticated session
+            # Collect COG URLs first (before making any HTTP requests)
+            results = []
+
+            if self.selected_cog_url:
+                link = self.selected_cog_url
+                layer_name = os.path.basename(link).split("?")[0]
+                vsi_path = f"/vsicurl/{link}"
+                results.append((layer_name, vsi_path, link))
+                self.progress.emit(f"Using selected: {layer_name}")
+            else:
+                for granule in self.granules:
+                    try:
+                        try:
+                            links = granule.data_links(access="external")
+                        except TypeError:
+                            links = granule.data_links()
+
+                        cog_links = [
+                            link
+                            for link in links
+                            if any(ext in link.lower() for ext in [".tif", ".tiff"])
+                            and link.startswith("http")
+                        ]
+
+                        if not cog_links:
+                            continue
+
+                        for link in cog_links[:1]:
+                            layer_name = os.path.basename(link).split("?")[0]
+                            vsi_path = f"/vsicurl/{link}"
+                            results.append((layer_name, vsi_path, link))
+                            self.progress.emit(f"Found: {layer_name}")
+
+                    except Exception as e:
+                        self.progress.emit(f"Error processing granule: {e}")
+
+            if not results:
+                self.finished.emit([], "")
+                return
+
+            # Get the authenticated session and make a HEAD request to the
+            # first COG URL. This triggers the URS OAuth redirect flow and
+            # populates the session with authentication cookies. Without this,
+            # the session has auth handlers but NO cookies, and the cookie
+            # file written below would be empty.
             session = earthaccess.get_requests_https_session()
+            first_url = results[0][2]
+            self.progress.emit("Acquiring authentication cookies...")
+            try:
+                session.head(first_url, allow_redirects=True, timeout=30)
+            except Exception as e:
+                self.progress.emit(f"Warning: HEAD request failed: {e}")
 
-            # Set up cookie file for GDAL authentication
+            # Now write the populated cookies to a Netscape cookie file
             cookie_file = os.path.expanduser("~/.urs_cookies")
-
-            # Save cookies from the session to the cookie file in Netscape format
+            cookie_count = 0
             try:
                 with open(cookie_file, "w") as f:
                     f.write("# Netscape HTTP Cookie File\n")
@@ -414,49 +463,10 @@ class COGDisplayWorker(QThread):
                             f"{secure}\t{expires}\t"
                             f"{cookie.name}\t{cookie.value}\n"
                         )
-                self.progress.emit("Saved authentication cookies")
+                        cookie_count += 1
+                self.progress.emit(f"Saved {cookie_count} authentication cookies")
             except Exception as e:
                 self.progress.emit(f"Warning: Could not save cookies: {e}")
-
-            results = []
-
-            # If a specific COG URL is provided, use that
-            if self.selected_cog_url:
-                link = self.selected_cog_url
-                layer_name = os.path.basename(link).split("?")[0]
-                vsi_path = f"/vsicurl/{link}"
-                results.append((layer_name, vsi_path, link))
-                self.progress.emit(f"Using selected: {layer_name}")
-            else:
-                # Get COGs from granules
-                for granule in self.granules:
-                    try:
-                        # Get HTTPS data links
-                        try:
-                            links = granule.data_links(access="external")
-                        except TypeError:
-                            links = granule.data_links()
-
-                        # Find COG/TIFF links (HTTPS only)
-                        cog_links = [
-                            link
-                            for link in links
-                            if any(ext in link.lower() for ext in [".tif", ".tiff"])
-                            and link.startswith("http")
-                        ]
-
-                        if not cog_links:
-                            continue
-
-                        # Use the first TIFF link
-                        for link in cog_links[:1]:
-                            layer_name = os.path.basename(link).split("?")[0]
-                            vsi_path = f"/vsicurl/{link}"
-                            results.append((layer_name, vsi_path, link))
-                            self.progress.emit(f"Found: {layer_name}")
-
-                    except Exception as e:
-                        self.progress.emit(f"Error processing granule: {e}")
 
             self.finished.emit(results, cookie_file)
 
@@ -1637,9 +1647,15 @@ class EarthdataDockWidget(QDockWidget):
             )
             return
 
-        # Set up GDAL configuration for NASA Earthdata authentication
+        # Set up GDAL configuration for NASA Earthdata authentication.
+        # Use cookies (populated by a HEAD request in the worker) as primary
+        # auth, and .netrc as backup for GDAL's own redirect handling.
         gdal.SetConfigOption("GDAL_HTTP_COOKIEFILE", cookie_file)
         gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", cookie_file)
+        netrc_path = os.path.expanduser("~/.netrc")
+        if os.path.exists(netrc_path):
+            gdal.SetConfigOption("GDAL_HTTP_NETRC", "YES")
+            gdal.SetConfigOption("GDAL_HTTP_NETRC_FILE", netrc_path)
         gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
         gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF")
         gdal.SetConfigOption("GDAL_HTTP_UNSAFESSL", "YES")
@@ -1658,8 +1674,21 @@ class EarthdataDockWidget(QDockWidget):
                 self._log(f"Loading: {layer_name}")
                 # Process events to update UI while loading
                 QApplication.processEvents()
-                layer = QgsRasterLayer(vsi_path, layer_name)
-                if layer.isValid():
+
+                # Use gdal.Open to get a detailed error message if it fails
+                gdal.PushErrorHandler("CPLQuietErrorHandler")
+                ds = gdal.Open(vsi_path)
+                gdal_err = gdal.GetLastErrorMsg()
+                gdal.PopErrorHandler()
+
+                if ds is not None:
+                    ds = None  # Close dataset before QGIS opens it
+                    layer = QgsRasterLayer(vsi_path, layer_name)
+                else:
+                    self._log(f"GDAL error: {gdal_err}", error=True)
+                    layer = None
+
+                if layer is not None and layer.isValid():
                     QgsProject.instance().addMapLayer(layer)
                     added_count += 1
                     self._log(f"Added layer: {layer_name}")
