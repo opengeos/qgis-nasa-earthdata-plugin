@@ -438,9 +438,7 @@ class COGDisplayWorker(QThread):
 
             # Download COG files using earthaccess authenticated session
             session = earthaccess.get_requests_https_session()
-            temp_dir = os.path.join(
-                tempfile.gettempdir(), "nasa_earthdata_cog_cache"
-            )
+            temp_dir = os.path.join(tempfile.gettempdir(), "nasa_earthdata_cog_cache")
             os.makedirs(temp_dir, exist_ok=True)
 
             results = []
@@ -448,9 +446,7 @@ class COGDisplayWorker(QThread):
                 layer_name = os.path.basename(url).split("?")[0]
                 local_path = os.path.join(temp_dir, layer_name)
 
-                self.progress.emit(
-                    f"Downloading {layer_name}... ({i}/{len(cog_urls)})"
-                )
+                self.progress.emit(f"Downloading {layer_name}... ({i}/{len(cog_urls)})")
                 try:
                     with session.get(url, stream=True, timeout=60) as resp:
                         resp.raise_for_status()
@@ -488,9 +484,7 @@ class COGDisplayWorker(QThread):
                     results.append((layer_name, local_path))
                     self.progress.emit(f"Downloaded: {layer_name}")
                 except Exception as e:
-                    self.progress.emit(
-                        f"Error downloading {layer_name}: {e}"
-                    )
+                    self.progress.emit(f"Error downloading {layer_name}: {e}")
 
             self.finished.emit(results)
 
@@ -1673,7 +1667,9 @@ class EarthdataDockWidget(QDockWidget):
             return
 
         using_vsicurl = any(
-            len(item) > 1 and isinstance(item[1], str) and item[1].startswith("/vsicurl/")
+            len(item) > 1
+            and isinstance(item[1], str)
+            and item[1].startswith("/vsicurl/")
             for item in results
         )
         if using_vsicurl and cookie_file:
