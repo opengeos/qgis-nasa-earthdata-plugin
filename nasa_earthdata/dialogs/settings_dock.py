@@ -8,7 +8,7 @@ credentials and plugin preferences.
 import os
 from pathlib import Path
 
-from qgis.PyQt.QtCore import Qt, QSettings
+from qgis.PyQt.QtCore import Qt, QSettings, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QWidget,
@@ -32,6 +32,9 @@ from qgis.PyQt.QtGui import QFont
 
 class SettingsDockWidget(QDockWidget):
     """A settings panel for configuring NASA Earthdata plugin options."""
+
+    # Emitted when dependencies are successfully installed
+    deps_installed = pyqtSignal()
 
     # Settings keys
     SETTINGS_PREFIX = "NASAEarthdata/"
@@ -440,6 +443,7 @@ class SettingsDockWidget(QDockWidget):
             self.iface.messageBar().pushSuccess(
                 "NASA Earthdata", "Dependencies installed successfully!"
             )
+            self.deps_installed.emit()
         else:
             self.deps_progress_label.setStyleSheet("color: red;")
             self.install_deps_btn.setEnabled(True)

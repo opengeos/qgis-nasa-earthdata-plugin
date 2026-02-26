@@ -79,10 +79,65 @@ class NumericTableWidgetItem(QTableWidgetItem):
             return super().__lt__(other)
 
 
+class CatalogData:
+    """Lightweight catalog data wrapper using stdlib only.
+
+    Provides the interface the UI needs (name listing, keyword filtering,
+    title lookup) without requiring pandas or the plugin venv.
+    """
+
+    def __init__(self, rows):
+        """Initialize with a list of dicts (one per TSV row).
+
+        Args:
+            rows: List of dicts with at least 'ShortName' and 'EntryTitle' keys.
+        """
+        self._rows = rows
+
+    def get_short_names(self):
+        """Return a list of all ShortName values.
+
+        Returns:
+            List of ShortName strings.
+        """
+        return [r.get("ShortName", "") for r in self._rows]
+
+    def filter_by_keyword(self, keyword):
+        """Return ShortNames where keyword matches ShortName or EntryTitle.
+
+        Args:
+            keyword: Lowercase search string.
+
+        Returns:
+            List of matching ShortName strings.
+        """
+        result = []
+        for r in self._rows:
+            sn = r.get("ShortName", "")
+            et = r.get("EntryTitle", "")
+            if keyword in sn.lower() or keyword in et.lower():
+                result.append(sn)
+        return result
+
+    def get_title(self, short_name):
+        """Get the EntryTitle for a given ShortName.
+
+        Args:
+            short_name: The ShortName to look up.
+
+        Returns:
+            The EntryTitle string, or None if not found.
+        """
+        for r in self._rows:
+            if r.get("ShortName") == short_name:
+                return r.get("EntryTitle", "")
+        return None
+
+
 class CatalogLoadWorker(QThread):
     """Worker thread for loading the NASA Earthdata catalog."""
 
-    finished = pyqtSignal(object, list)  # dataframe, names list
+    finished = pyqtSignal(object, list)  # CatalogData, names list
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
@@ -93,14 +148,8 @@ class CatalogLoadWorker(QThread):
     def run(self):
         """Load the catalog from cache or download."""
         try:
-            from ..core.venv_manager import ensure_venv_packages_available
-
-            if not ensure_venv_packages_available():
-                raise RuntimeError(
-                    "Plugin Python dependencies are not installed. "
-                    "Open Settings and run 'Install Dependencies'."
-                )
-            import pandas as pd
+            import csv
+            import urllib.request
 
             # Ensure cache directory exists
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -116,15 +165,22 @@ class CatalogLoadWorker(QThread):
                     self.progress.emit("Loading catalog from cache...")
 
             if use_cache:
-                df = pd.read_csv(CATALOG_CACHE_FILE, sep="\t")
+                with open(CATALOG_CACHE_FILE, "r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f, delimiter="\t")
+                    rows = list(reader)
             else:
                 self.progress.emit("Downloading NASA Earthdata catalog...")
-                df = pd.read_csv(NASA_DATA_URL, sep="\t")
-                # Save to cache
-                df.to_csv(CATALOG_CACHE_FILE, sep="\t", index=False)
+                with urllib.request.urlopen(NASA_DATA_URL, timeout=30) as resp:
+                    text = resp.read().decode("utf-8")
+                # Save raw TSV to cache
+                with open(CATALOG_CACHE_FILE, "w", encoding="utf-8") as f:
+                    f.write(text)
+                reader = csv.DictReader(text.splitlines(), delimiter="\t")
+                rows = list(reader)
 
-            names = df["ShortName"].tolist()
-            self.finished.emit(df, names)
+            catalog = CatalogData(rows)
+            names = catalog.get_short_names()
+            self.finished.emit(catalog, names)
 
         except Exception as e:
             self.error.emit(str(e))
@@ -878,6 +934,10 @@ class EarthdataDockWidget(QDockWidget):
         self._catalog_worker.progress.connect(self._log)
         self._catalog_worker.start()
 
+    def reload_catalog(self):
+        """Reload the catalog, e.g. after dependencies are installed."""
+        self._load_datasets()
+
     def _on_catalog_loaded(self, df, names):
         """Handle catalog loaded."""
         self.refresh_catalog_btn.setEnabled(True)
@@ -931,12 +991,7 @@ class EarthdataDockWidget(QDockWidget):
         if self._nasa_data is None:
             return
 
-        # Filter datasets - only search in ShortName and EntryTitle columns
-        df = self._nasa_data
-        mask = df["ShortName"].str.lower().str.contains(keyword, na=False) | df[
-            "EntryTitle"
-        ].str.lower().str.contains(keyword, na=False)
-        filtered = df[mask]["ShortName"].tolist()
+        filtered = self._nasa_data.filter_by_keyword(keyword)
 
         self.dataset_combo.clear()
         self.dataset_combo.addItems(filtered)
@@ -949,10 +1004,11 @@ class EarthdataDockWidget(QDockWidget):
             return
 
         try:
-            row = self._nasa_data[self._nasa_data["ShortName"] == short_name]
-            if not row.empty:
-                title = row["EntryTitle"].values[0]
+            title = self._nasa_data.get_title(short_name)
+            if title:
                 self.title_label.setText(title)
+            else:
+                self.title_label.clear()
         except Exception:
             self.title_label.clear()
 
