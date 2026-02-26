@@ -359,7 +359,7 @@ class COGDisplayWorker(QThread):
     def _login(self, earthaccess):
         """Authenticate with earthaccess using available credentials.
 
-        Tries environment variables, .netrc, and Settings input boxes in order.
+        Tries .netrc, environment variables, and Settings input boxes in order.
 
         Args:
             earthaccess: The earthaccess module.
@@ -367,8 +367,8 @@ class COGDisplayWorker(QThread):
         Returns:
             True if authenticated, False otherwise.
         """
-        # Try environment vars and .netrc
-        for strategy in ("environment", "netrc"):
+        # Prefer .netrc for persistent credentials, then environment vars.
+        for strategy in ("netrc", "environment"):
             try:
                 auth = earthaccess.login(strategy=strategy, persist=True)
                 if getattr(auth, "authenticated", False):

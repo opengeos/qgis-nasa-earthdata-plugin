@@ -608,6 +608,26 @@ class SettingsDockWidget(QDockWidget):
             self.netrc_status_label.setText(f"Error reading .netrc: {str(e)[:30]}")
             self.netrc_status_label.setStyleSheet("color: red;")
 
+    def _get_netrc_earthdata_credentials(self):
+        """Return Earthdata credentials from ~/.netrc if available."""
+        netrc_path = Path.home() / ".netrc"
+        if not netrc_path.exists():
+            return None, None
+
+        try:
+            import netrc
+
+            auths = netrc.netrc(str(netrc_path))
+            earthdata_auth = auths.authenticators("urs.earthdata.nasa.gov")
+            if not earthdata_auth:
+                return None, None
+
+            username = earthdata_auth[0] or ""
+            password = earthdata_auth[2] or ""
+            return username, password
+        except Exception:
+            return None, None
+
     def _clear_cache(self):
         """Clear the plugin cache."""
         cache_dir = self.cache_dir_input.text().strip()
@@ -646,11 +666,43 @@ class SettingsDockWidget(QDockWidget):
 
     def _load_settings(self):
         """Load settings from QSettings."""
-        # Credentials
-        self.username_input.setText(
-            self.settings.value(f"{self.SETTINGS_PREFIX}username", "", type=str)
-        )
-        # Don't load password for security reasons
+        # Credentials precedence: .netrc -> environment -> QSettings username
+        username = ""
+        password = ""
+        source = None
+
+        netrc_username, netrc_password = self._get_netrc_earthdata_credentials()
+        if netrc_username:
+            username = netrc_username
+            password = netrc_password or ""
+            source = ".netrc"
+        else:
+            env_username = os.environ.get("EARTHDATA_USERNAME", "").strip()
+            env_password = os.environ.get("EARTHDATA_PASSWORD", "").strip()
+            if env_username:
+                username = env_username
+                password = env_password
+                source = "environment"
+            else:
+                username = self.settings.value(
+                    f"{self.SETTINGS_PREFIX}username", "", type=str
+                )
+                source = "saved settings"
+
+        self.username_input.setText(username)
+        # Only auto-fill password from .netrc/environment, not QSettings.
+        self.password_input.setText(password)
+
+        if source == ".netrc":
+            self.creds_status_label.setText(
+                "Using credentials from ~/.netrc (preferred)"
+            )
+            self.creds_status_label.setStyleSheet("color: green;")
+        elif source == "environment":
+            self.creds_status_label.setText(
+                "Using credentials from EARTHDATA_USERNAME/EARTHDATA_PASSWORD"
+            )
+            self.creds_status_label.setStyleSheet("color: green;")
 
         # General
         self.download_dir_input.setText(
@@ -705,6 +757,23 @@ class SettingsDockWidget(QDockWidget):
             os.environ["EARTHDATA_USERNAME"] = username
         if password:
             os.environ["EARTHDATA_PASSWORD"] = password
+        if username and password:
+            try:
+                self._save_netrc(username, password)
+                self.creds_status_label.setText(
+                    "✓ Credentials saved to ~/.netrc and environment"
+                )
+                self.creds_status_label.setStyleSheet(
+                    "color: green; font-weight: bold;"
+                )
+            except Exception as e:
+                self.creds_status_label.setText(f"Failed to save .netrc: {str(e)[:50]}")
+                self.creds_status_label.setStyleSheet("color: red;")
+        elif username:
+            self.creds_status_label.setText(
+                "Username saved. Enter password and Save to persist to ~/.netrc"
+            )
+            self.creds_status_label.setStyleSheet("color: orange;")
 
         # General
         self.settings.setValue(
@@ -740,6 +809,7 @@ class SettingsDockWidget(QDockWidget):
         )
 
         self.settings.sync()
+        self._check_netrc()
 
         self.status_label.setText("Settings saved")
         self.status_label.setStyleSheet("color: green; font-size: 10px;")
