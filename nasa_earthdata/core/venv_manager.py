@@ -302,7 +302,11 @@ def _cleanup_partial_venv(venv_dir):
 
 
 def create_venv(venv_dir=None, progress_callback=None):
-    """Create a virtual environment using the standalone Python.
+    """Create a virtual environment using uv (preferred) or stdlib venv.
+
+    When uv is available, uses ``uv venv`` which is faster and does not
+    require pip to be bootstrapped inside the venv.  Falls back to
+    ``python -m venv`` + ``ensurepip`` when uv is not available.
 
     Args:
         venv_dir: Optional venv directory path. Defaults to VENV_DIR.
@@ -322,7 +326,17 @@ def create_venv(venv_dir=None, progress_callback=None):
     system_python = _get_system_python()
     _log(f"Using Python: {system_python}")
 
-    cmd = [system_python, "-m", "venv", venv_dir]
+    from .uv_manager import uv_exists, get_uv_path
+
+    use_uv = uv_exists()
+
+    if use_uv:
+        uv_path = get_uv_path()
+        cmd = [uv_path, "venv", "--python", system_python, venv_dir]
+        _log("Creating venv with uv")
+    else:
+        cmd = [system_python, "-m", "venv", venv_dir]
+        _log("Creating venv with stdlib venv")
 
     try:
         env = _get_clean_env_for_venv()
@@ -340,32 +354,38 @@ def create_venv(venv_dir=None, progress_callback=None):
         if result.returncode == 0:
             _log("Virtual environment created successfully", Qgis.Success)
 
-            # Ensure pip is available
-            pip_path = get_venv_pip_path(venv_dir)
-            if not os.path.exists(pip_path):
-                _log("pip not found in venv, bootstrapping with ensurepip...")
-                python_in_venv = get_venv_python_path(venv_dir)
-                ensurepip_cmd = [python_in_venv, "-m", "ensurepip", "--upgrade"]
-                try:
-                    ensurepip_result = subprocess.run(
-                        ensurepip_cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=120,
-                        env=env,
-                        **kwargs,
-                    )
-                    if ensurepip_result.returncode == 0:
-                        _log("pip bootstrapped via ensurepip", Qgis.Success)
-                    else:
-                        err = ensurepip_result.stderr or ensurepip_result.stdout
-                        _log(f"ensurepip failed: {err[:200]}", Qgis.Warning)
+            # When using stdlib venv, ensure pip is available
+            if not use_uv:
+                pip_path = get_venv_pip_path(venv_dir)
+                if not os.path.exists(pip_path):
+                    _log("pip not found in venv, bootstrapping with ensurepip...")
+                    python_in_venv = get_venv_python_path(venv_dir)
+                    ensurepip_cmd = [
+                        python_in_venv,
+                        "-m",
+                        "ensurepip",
+                        "--upgrade",
+                    ]
+                    try:
+                        ensurepip_result = subprocess.run(
+                            ensurepip_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                            env=env,
+                            **kwargs,
+                        )
+                        if ensurepip_result.returncode == 0:
+                            _log("pip bootstrapped via ensurepip", Qgis.Success)
+                        else:
+                            err = ensurepip_result.stderr or ensurepip_result.stdout
+                            _log(f"ensurepip failed: {err[:200]}", Qgis.Warning)
+                            _cleanup_partial_venv(venv_dir)
+                            return False, f"Failed to bootstrap pip: {err[:200]}"
+                    except Exception as e:
+                        _log(f"ensurepip exception: {e}", Qgis.Warning)
                         _cleanup_partial_venv(venv_dir)
-                        return False, f"Failed to bootstrap pip: {err[:200]}"
-                except Exception as e:
-                    _log(f"ensurepip exception: {e}", Qgis.Warning)
-                    _cleanup_partial_venv(venv_dir)
-                    return False, f"Failed to bootstrap pip: {str(e)[:200]}"
+                        return False, f"Failed to bootstrap pip: {str(e)[:200]}"
 
             if progress_callback:
                 progress_callback(20, "Virtual environment created")
@@ -433,6 +453,9 @@ def _is_network_error(stderr):
 def install_dependencies(venv_dir=None, progress_callback=None, cancel_check=None):
     """Install required packages into the virtual environment.
 
+    Uses uv when available for significantly faster installation,
+    falling back to pip otherwise.
+
     Args:
         venv_dir: Optional venv directory path. Defaults to VENV_DIR.
         progress_callback: Function called with (percent, message).
@@ -451,6 +474,15 @@ def install_dependencies(venv_dir=None, progress_callback=None, cancel_check=Non
     env = _get_clean_env_for_venv()
     kwargs = _get_subprocess_kwargs()
 
+    from .uv_manager import uv_exists, get_uv_path
+
+    use_uv = uv_exists()
+    if use_uv:
+        uv_path = get_uv_path()
+        _log("Installing dependencies with uv")
+    else:
+        _log("Installing dependencies with pip")
+
     total = len(REQUIRED_PACKAGES)
     installed_count = 0
 
@@ -467,21 +499,35 @@ def install_dependencies(venv_dir=None, progress_callback=None, cancel_check=Non
         if progress_callback:
             progress_callback(base_percent, f"Installing {package_name}...")
 
-        cmd = [
-            python_path,
-            "-m",
-            "pip",
-            "install",
-            "--upgrade",
-            "--prefer-binary",
-            "--disable-pip-version-check",
-            "--no-warn-script-location",
-            pkg_spec,
-        ]
+        if use_uv:
+            cmd = [
+                uv_path,
+                "pip",
+                "install",
+                "--python",
+                python_path,
+                "--upgrade",
+                pkg_spec,
+            ]
+            success, error_msg = _run_uv_install(
+                cmd, env, kwargs, package_name, timeout=600
+            )
+        else:
+            cmd = [
+                python_path,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--prefer-binary",
+                "--disable-pip-version-check",
+                "--no-warn-script-location",
+                pkg_spec,
+            ]
+            success, error_msg = _run_pip_install(
+                cmd, env, kwargs, package_name, timeout=600
+            )
 
-        success, error_msg = _run_pip_install(
-            cmd, env, kwargs, package_name, timeout=600
-        )
         if not success:
             return False, error_msg
 
@@ -575,6 +621,92 @@ def _run_pip_install(cmd, env, kwargs, package_name, timeout=600):
         )
     except FileNotFoundError:
         return False, "Python executable not found in virtual environment."
+    except Exception as e:
+        return False, f"Unexpected error installing '{package_name}': {str(e)}"
+
+
+def _run_uv_install(cmd, env, kwargs, package_name, timeout=600):
+    """Run a uv pip install command with retry logic.
+
+    Args:
+        cmd: The command list to execute.
+        env: Environment dict for the subprocess.
+        kwargs: Additional subprocess kwargs.
+        package_name: Name of the package being installed (for logging).
+        timeout: Timeout in seconds.
+
+    Returns:
+        A tuple of (success: bool, error_message: str).
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            **kwargs,
+        )
+
+        if result.returncode == 0:
+            return True, ""
+
+        stderr = result.stderr or result.stdout or ""
+
+        # Retry on SSL errors with --allow-insecure-host
+        if _is_ssl_error(stderr):
+            _log(
+                f"SSL error installing {package_name} via uv, "
+                "retrying with insecure hosts",
+                Qgis.Warning,
+            )
+            retry_cmd = cmd + [
+                "--allow-insecure-host",
+                "pypi.org",
+                "--allow-insecure-host",
+                "files.pythonhosted.org",
+            ]
+            retry_result = subprocess.run(
+                retry_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+                **kwargs,
+            )
+            if retry_result.returncode == 0:
+                return True, ""
+            stderr = retry_result.stderr or retry_result.stdout or stderr
+
+        # Retry on network errors with a delay
+        if _is_network_error(stderr):
+            _log(
+                f"Network error installing {package_name} via uv, " "retrying in 5s...",
+                Qgis.Warning,
+            )
+            time.sleep(5)
+            retry_result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+                **kwargs,
+            )
+            if retry_result.returncode == 0:
+                return True, ""
+            stderr = retry_result.stderr or retry_result.stdout or stderr
+
+        # Classify the error for a user-friendly message
+        return False, _classify_pip_error(package_name, stderr)
+
+    except subprocess.TimeoutExpired:
+        return False, (
+            f"Installation of '{package_name}' timed out after "
+            f"{timeout // 60} minutes."
+        )
+    except FileNotFoundError:
+        return False, "uv executable not found."
     except Exception as e:
         return False, f"Unexpected error installing '{package_name}': {str(e)}"
 
@@ -877,10 +1009,11 @@ def check_dependencies():
 
 
 def create_venv_and_install(progress_callback=None, cancel_check=None):
-    """Complete installation: download Python + create venv + install packages.
+    """Complete installation: download Python + download uv + create venv + install.
 
     Progress breakdown:
-        0-40%: Download Python standalone
+        0-35%: Download Python standalone
+        35-40%: Download uv package installer
         40-50%: Create virtual environment
         50-90%: Install packages
         90-100%: Verify installation
@@ -896,14 +1029,17 @@ def create_venv_and_install(progress_callback=None, cancel_check=None):
         standalone_python_exists,
         download_python_standalone,
     )
+    from .uv_manager import uv_exists, download_uv
 
-    # Step 1: Download Python standalone if needed (0-40%)
+    start_time = time.time()
+
+    # Step 1: Download Python standalone if needed (0-35%)
     if not standalone_python_exists():
         _log("Downloading Python standalone...")
 
         def python_progress(percent, msg):
             if progress_callback:
-                progress_callback(int(percent * 0.40), msg)
+                progress_callback(int(percent * 0.35), msg)
 
         success, msg = download_python_standalone(
             progress_callback=python_progress,
@@ -927,7 +1063,36 @@ def create_venv_and_install(progress_callback=None, cancel_check=None):
     else:
         _log("Python standalone already installed")
         if progress_callback:
-            progress_callback(40, "Python standalone ready")
+            progress_callback(35, "Python standalone ready")
+
+    # Step 1b: Download uv package installer if needed (35-40%)
+    if not uv_exists():
+        _log("Downloading uv package installer...")
+
+        def uv_progress(percent, msg):
+            if progress_callback:
+                progress_callback(35 + int(percent * 0.05), msg)
+
+        success, msg = download_uv(
+            progress_callback=uv_progress,
+            cancel_check=cancel_check,
+        )
+
+        if not success:
+            # Non-fatal: fall back to pip for venv creation and installation
+            _log(
+                f"uv download failed ({msg}), will use pip instead",
+                Qgis.Warning,
+            )
+        else:
+            _log("uv package installer ready")
+
+        if cancel_check and cancel_check():
+            return False, "Installation cancelled"
+    else:
+        _log("uv already installed")
+        if progress_callback:
+            progress_callback(40, "uv ready")
 
     # Step 2: Create venv if needed (40-50%)
     if venv_exists():
@@ -973,11 +1138,18 @@ def create_venv_and_install(progress_callback=None, cancel_check=None):
     if not is_valid:
         return False, f"Verification failed: {verify_msg}"
 
-    if progress_callback:
-        progress_callback(100, "All dependencies installed")
+    elapsed = time.time() - start_time
+    if elapsed >= 60:
+        minutes, seconds = divmod(int(elapsed), 60)
+        elapsed_str = f"{minutes}:{seconds:02d}"
+    else:
+        elapsed_str = f"{elapsed:.1f}s"
 
-    _log("All dependencies installed and verified", Qgis.Success)
-    return True, "All dependencies installed successfully"
+    if progress_callback:
+        progress_callback(100, f"All dependencies installed in {elapsed_str}")
+
+    _log(f"All dependencies installed and verified in {elapsed_str}", Qgis.Success)
+    return True, f"All dependencies installed successfully in {elapsed_str}"
 
 
 # ---------------------------------------------------------------------------
