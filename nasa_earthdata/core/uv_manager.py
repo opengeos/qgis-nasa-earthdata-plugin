@@ -26,7 +26,7 @@ CACHE_DIR = os.path.expanduser("~/.qgis_nasa_earthdata")
 UV_DIR = os.path.join(CACHE_DIR, "uv")
 
 # Pin a known-good uv version
-UV_VERSION = "0.6.12"
+UV_VERSION = "0.10.6"
 
 
 def _log(message, level=Qgis.Info):
