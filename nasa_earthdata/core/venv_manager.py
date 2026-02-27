@@ -483,76 +483,72 @@ def install_dependencies(venv_dir=None, progress_callback=None, cancel_check=Non
     else:
         _log("Installing dependencies with pip")
 
-    total = len(REQUIRED_PACKAGES)
-    installed_count = 0
-
-    for i, (package_name, version_spec) in enumerate(REQUIRED_PACKAGES):
-        if cancel_check and cancel_check():
-            return False, (
-                f"Installation cancelled. "
-                f"{installed_count}/{total} packages installed."
-            )
-
+    # Build the full list of package specs for batch installation
+    pkg_specs = []
+    pkg_names = []
+    for package_name, version_spec in REQUIRED_PACKAGES:
         pkg_spec = f"{package_name}{version_spec}" if version_spec else package_name
-        base_percent = int(20 + (i / total) * 70)  # 20-90% range
+        pkg_specs.append(pkg_spec)
+        pkg_names.append(package_name)
 
-        if progress_callback:
-            progress_callback(base_percent, f"Installing {package_name}...")
+    if cancel_check and cancel_check():
+        return False, "Installation cancelled."
 
-        if use_uv:
-            cmd = [
-                uv_path,
-                "pip",
-                "install",
-                "--python",
-                python_path,
-                "--upgrade",
-                pkg_spec,
-            ]
-            success, error_msg = _run_uv_install(
-                cmd, env, kwargs, package_name, timeout=600
-            )
-        else:
-            cmd = [
-                python_path,
-                "-m",
-                "pip",
-                "install",
-                "--upgrade",
-                "--prefer-binary",
-                "--disable-pip-version-check",
-                "--no-warn-script-location",
-                pkg_spec,
-            ]
-            success, error_msg = _run_pip_install(
-                cmd, env, kwargs, package_name, timeout=600
-            )
+    if progress_callback:
+        progress_callback(20, f"Installing {', '.join(pkg_names)}...")
 
-        if not success:
-            return False, error_msg
+    if use_uv:
+        cmd = [
+            uv_path,
+            "pip",
+            "install",
+            "--python",
+            python_path,
+            "--upgrade",
+        ] + pkg_specs
+        success, error_msg = _run_uv_install(cmd, env, kwargs, pkg_names, timeout=600)
+    else:
+        cmd = [
+            python_path,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--prefer-binary",
+            "--disable-pip-version-check",
+            "--no-warn-script-location",
+        ] + pkg_specs
+        success, error_msg = _run_pip_install(cmd, env, kwargs, pkg_names, timeout=600)
 
-        installed_count += 1
-        _log(f"Installed {package_name} ({installed_count}/{total})", Qgis.Success)
+    if not success:
+        return False, error_msg
+
+    total = len(REQUIRED_PACKAGES)
+    _log(f"Installed {total} package(s)", Qgis.Success)
 
     if progress_callback:
         progress_callback(90, "All packages installed")
 
-    return True, f"Successfully installed {installed_count} package(s)"
+    return True, f"Successfully installed {total} package(s)"
 
 
-def _run_pip_install(cmd, env, kwargs, package_name, timeout=600):
+def _run_pip_install(cmd, env, kwargs, package_names, timeout=600):
     """Run a pip install command with retry logic.
 
     Args:
         cmd: The command list to execute.
         env: Environment dict for the subprocess.
         kwargs: Additional subprocess kwargs.
-        package_name: Name of the package being installed (for logging).
+        package_names: Name(s) of the package(s) being installed (for logging).
+            Can be a single string or a list of strings.
         timeout: Timeout in seconds.
 
     Returns:
         A tuple of (success: bool, error_message: str).
     """
+    display_name = (
+        ", ".join(package_names) if isinstance(package_names, list) else package_names
+    )
     try:
         result = subprocess.run(
             cmd,
@@ -571,7 +567,7 @@ def _run_pip_install(cmd, env, kwargs, package_name, timeout=600):
         # Retry on SSL errors with --trusted-host
         if _is_ssl_error(stderr):
             _log(
-                f"SSL error installing {package_name}, retrying with trusted hosts",
+                f"SSL error installing {display_name}, retrying with trusted hosts",
                 Qgis.Warning,
             )
             retry_cmd = cmd + [
@@ -595,7 +591,7 @@ def _run_pip_install(cmd, env, kwargs, package_name, timeout=600):
         # Retry on network errors with a delay
         if _is_network_error(stderr):
             _log(
-                f"Network error installing {package_name}, retrying in 5s...",
+                f"Network error installing {display_name}, retrying in 5s...",
                 Qgis.Warning,
             )
             time.sleep(5)
@@ -612,32 +608,36 @@ def _run_pip_install(cmd, env, kwargs, package_name, timeout=600):
             stderr = retry_result.stderr or retry_result.stdout or stderr
 
         # Classify the error for a user-friendly message
-        return False, _classify_pip_error(package_name, stderr)
+        return False, _classify_pip_error(display_name, stderr)
 
     except subprocess.TimeoutExpired:
         return False, (
-            f"Installation of '{package_name}' timed out after "
+            f"Installation of '{display_name}' timed out after "
             f"{timeout // 60} minutes."
         )
     except FileNotFoundError:
         return False, "Python executable not found in virtual environment."
     except Exception as e:
-        return False, f"Unexpected error installing '{package_name}': {str(e)}"
+        return False, f"Unexpected error installing '{display_name}': {str(e)}"
 
 
-def _run_uv_install(cmd, env, kwargs, package_name, timeout=600):
+def _run_uv_install(cmd, env, kwargs, package_names, timeout=600):
     """Run a uv pip install command with retry logic.
 
     Args:
         cmd: The command list to execute.
         env: Environment dict for the subprocess.
         kwargs: Additional subprocess kwargs.
-        package_name: Name of the package being installed (for logging).
+        package_names: Name(s) of the package(s) being installed (for logging).
+            Can be a single string or a list of strings.
         timeout: Timeout in seconds.
 
     Returns:
         A tuple of (success: bool, error_message: str).
     """
+    display_name = (
+        ", ".join(package_names) if isinstance(package_names, list) else package_names
+    )
     try:
         result = subprocess.run(
             cmd,
@@ -656,7 +656,7 @@ def _run_uv_install(cmd, env, kwargs, package_name, timeout=600):
         # Retry on SSL errors with --allow-insecure-host
         if _is_ssl_error(stderr):
             _log(
-                f"SSL error installing {package_name} via uv, "
+                f"SSL error installing {display_name} via uv, "
                 "retrying with insecure hosts",
                 Qgis.Warning,
             )
@@ -681,7 +681,7 @@ def _run_uv_install(cmd, env, kwargs, package_name, timeout=600):
         # Retry on network errors with a delay
         if _is_network_error(stderr):
             _log(
-                f"Network error installing {package_name} via uv, " "retrying in 5s...",
+                f"Network error installing {display_name} via uv, " "retrying in 5s...",
                 Qgis.Warning,
             )
             time.sleep(5)
@@ -698,17 +698,17 @@ def _run_uv_install(cmd, env, kwargs, package_name, timeout=600):
             stderr = retry_result.stderr or retry_result.stdout or stderr
 
         # Classify the error for a user-friendly message
-        return False, _classify_pip_error(package_name, stderr)
+        return False, _classify_pip_error(display_name, stderr)
 
     except subprocess.TimeoutExpired:
         return False, (
-            f"Installation of '{package_name}' timed out after "
+            f"Installation of '{display_name}' timed out after "
             f"{timeout // 60} minutes."
         )
     except FileNotFoundError:
         return False, "uv executable not found."
     except Exception as e:
-        return False, f"Unexpected error installing '{package_name}': {str(e)}"
+        return False, f"Unexpected error installing '{display_name}': {str(e)}"
 
 
 def _classify_pip_error(package_name, stderr):
