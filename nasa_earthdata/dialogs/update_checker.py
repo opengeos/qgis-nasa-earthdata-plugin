@@ -10,7 +10,6 @@ import re
 import shutil
 import tempfile
 import zipfile
-from urllib.request import urlopen, urlretrieve
 from urllib.error import URLError, HTTPError
 
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
@@ -28,18 +27,14 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.PyQt.QtGui import QFont
 
+from ..core.net import https_only_urlopen, https_only_urlretrieve
+
 # GitHub URLs for the plugin
 GITHUB_REPO = "opengeos/qgis-nasa-earthdata-plugin"
 GITHUB_BRANCH = "main"
 PLUGIN_PATH = "nasa_earthdata"
 METADATA_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{PLUGIN_PATH}/metadata.txt"
 ZIP_URL = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
-
-
-def _require_https(url: str) -> None:
-    """Reject any URL that is not https:// before passing it to urllib."""
-    if not url.lower().startswith("https://"):
-        raise ValueError(f"Refusing non-https URL: {url!r}")
 
 
 class VersionCheckWorker(QThread):
@@ -51,10 +46,7 @@ class VersionCheckWorker(QThread):
     def run(self):
         """Fetch the latest metadata from GitHub."""
         try:
-            _require_https(METADATA_URL)
-            with urlopen(
-                METADATA_URL, timeout=15
-            ) as response:  # nosec B310 - https-only enforced above
+            with https_only_urlopen(METADATA_URL, timeout=15) as response:
                 content = response.read().decode("utf-8")
 
             # Parse version from metadata
@@ -115,10 +107,7 @@ class DownloadWorker(QThread):
                     percent = min(int((downloaded / total_size) * 50), 50)
                     self.progress.emit(10 + percent, "Downloading...")
 
-            _require_https(ZIP_URL)
-            urlretrieve(
-                ZIP_URL, zip_path, reporthook
-            )  # nosec B310 - https-only enforced above
+            https_only_urlretrieve(ZIP_URL, zip_path, reporthook=reporthook)
 
             self.progress.emit(60, "Extracting files...")
 

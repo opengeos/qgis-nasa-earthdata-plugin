@@ -49,17 +49,12 @@ from qgis.core import (
     QgsRectangle,
 )
 
+from ..core.net import https_only_urlopen
+
 # NASA Earthdata TSV URL
 NASA_DATA_URL = (
     "https://github.com/opengeos/NASA-Earth-Data/raw/main/nasa_earth_data.tsv"
 )
-
-
-def _require_https(url: str) -> None:
-    """Reject any URL that is not https:// before passing it to urllib."""
-    if not url.lower().startswith("https://"):
-        raise ValueError(f"Refusing non-https URL: {url!r}")
-
 
 # Cache settings
 CACHE_DIR = Path(tempfile.gettempdir()) / "nasa_earthdata_cache"
@@ -156,7 +151,6 @@ class CatalogLoadWorker(QThread):
         """Load the catalog from cache or download."""
         try:
             import csv
-            import urllib.request
 
             # Ensure cache directory exists
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -177,10 +171,7 @@ class CatalogLoadWorker(QThread):
                     rows = list(reader)
             else:
                 self.progress.emit("Downloading NASA Earthdata catalog...")
-                _require_https(NASA_DATA_URL)
-                with urllib.request.urlopen(
-                    NASA_DATA_URL, timeout=30
-                ) as resp:  # nosec B310 - https-only enforced above
+                with https_only_urlopen(NASA_DATA_URL, timeout=30) as resp:
                     text = resp.read().decode("utf-8")
                 # Save raw TSV to cache
                 with open(CATALOG_CACHE_FILE, "w", encoding="utf-8") as f:
