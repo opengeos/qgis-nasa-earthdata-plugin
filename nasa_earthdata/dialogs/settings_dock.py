@@ -52,7 +52,9 @@ class SettingsDockWidget(QDockWidget):
         self.settings = QSettings()
         self._deps_worker = None
 
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
 
         self._setup_ui()
         self._load_settings()
@@ -73,7 +75,7 @@ class SettingsDockWidget(QDockWidget):
         header_font.setPointSize(11)
         header_font.setBold(True)
         header_label.setFont(header_font)
-        header_label.setAlignment(Qt.AlignCenter)
+        header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header_label)
 
         # Tab widget for organized settings
@@ -144,7 +146,7 @@ class SettingsDockWidget(QDockWidget):
         # Password
         self.password_input = QLineEdit()
         self.password_input.setPlaceholderText("NASA Earthdata password")
-        self.password_input.setEchoMode(QLineEdit.Password)
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         creds_layout.addRow("Password:", self.password_input)
 
         # Test credentials button
@@ -538,7 +540,7 @@ class SettingsDockWidget(QDockWidget):
                 with open(netrc_path, "r") as f:
                     existing_content = f.read()
             except Exception:
-                pass
+                pass  # nosec B110 - unreadable .netrc treated as empty content
 
         # Parse existing entries, excluding any existing earthdata entry
         lines = existing_content.strip().split("\n") if existing_content.strip() else []
@@ -648,11 +650,11 @@ class SettingsDockWidget(QDockWidget):
             self,
             "Clear Cache",
             f"Are you sure you want to clear the cache?\n\n{cache_dir}",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
 
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             try:
                 import shutil
 
@@ -668,7 +670,7 @@ class SettingsDockWidget(QDockWidget):
         """Load settings from QSettings."""
         # Credentials precedence: .netrc -> environment -> QSettings username
         username = ""
-        password = ""
+        password = ""  # nosec B105 - empty fallback, real value loaded below
         source = None
 
         netrc_username, netrc_password = self._get_netrc_earthdata_credentials()
@@ -824,11 +826,11 @@ class SettingsDockWidget(QDockWidget):
             self,
             "Reset Settings",
             "Are you sure you want to reset all settings to defaults?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
 
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
         # Credentials
