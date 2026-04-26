@@ -54,6 +54,13 @@ NASA_DATA_URL = (
     "https://github.com/opengeos/NASA-Earth-Data/raw/main/nasa_earth_data.tsv"
 )
 
+
+def _require_https(url: str) -> None:
+    """Reject any URL that is not https:// before passing it to urllib."""
+    if not url.lower().startswith("https://"):
+        raise ValueError(f"Refusing non-https URL: {url!r}")
+
+
 # Cache settings
 CACHE_DIR = Path(tempfile.gettempdir()) / "nasa_earthdata_cache"
 CATALOG_CACHE_FILE = CACHE_DIR / "nasa_earth_data.tsv"
@@ -66,8 +73,8 @@ class NumericTableWidgetItem(QTableWidgetItem):
     def __lt__(self, other):
         """Compare items using numeric data stored in UserRole."""
         try:
-            self_data = self.data(Qt.UserRole)
-            other_data = other.data(Qt.UserRole)
+            self_data = self.data(Qt.ItemDataRole.UserRole)
+            other_data = other.data(Qt.ItemDataRole.UserRole)
             # Handle None values
             if self_data is None:
                 return True
@@ -170,7 +177,10 @@ class CatalogLoadWorker(QThread):
                     rows = list(reader)
             else:
                 self.progress.emit("Downloading NASA Earthdata catalog...")
-                with urllib.request.urlopen(NASA_DATA_URL, timeout=30) as resp:
+                _require_https(NASA_DATA_URL)
+                with urllib.request.urlopen(
+                    NASA_DATA_URL, timeout=30
+                ) as resp:  # nosec B310 - https-only enforced above
                     text = resp.read().decode("utf-8")
                 # Save raw TSV to cache
                 with open(CATALOG_CACHE_FILE, "w", encoding="utf-8") as f:
@@ -375,7 +385,7 @@ class COGDisplayWorker(QThread):
                     self.progress.emit(f"Authenticated via {strategy}")
                     return True
             except Exception:
-                continue
+                continue  # nosec B112 - try the next auth strategy
 
         # Try credentials from Settings input boxes
         if self.username and self.password:
@@ -387,7 +397,7 @@ class COGDisplayWorker(QThread):
                     self.progress.emit("Authenticated via settings input")
                     return True
             except Exception:
-                pass
+                pass  # nosec B110 - auth failure handled by returning False below
 
         return False
 
@@ -542,7 +552,9 @@ class EarthdataDockWidget(QDockWidget):
         self.iface = iface
         self.settings = QSettings()
 
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
 
         # Set minimum width but allow resizing
         self.setMinimumWidth(300)
@@ -569,8 +581,8 @@ class EarthdataDockWidget(QDockWidget):
         # Create scroll area for the content
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         # Main widget inside scroll area
         main_widget = QWidget()
@@ -602,7 +614,9 @@ class EarthdataDockWidget(QDockWidget):
         # Search section
         search_group = QGroupBox("Search Parameters")
         search_layout = QFormLayout(search_group)
-        search_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        search_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
 
         # Keyword filter
         self.keyword_input = QLineEdit()
@@ -615,7 +629,9 @@ class EarthdataDockWidget(QDockWidget):
         self.dataset_combo.setMaxVisibleItems(20)
         self.dataset_combo.currentTextChanged.connect(self._on_dataset_changed)
         # Use AdjustToContents so dropdown shows full text
-        self.dataset_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.dataset_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
         self.dataset_combo.setMinimumContentsLength(20)
         search_layout.addRow("Dataset:", self.dataset_combo)
 
@@ -676,7 +692,9 @@ class EarthdataDockWidget(QDockWidget):
         # Advanced options container widget (hidden by default)
         self.advanced_widget = QWidget()
         advanced_layout = QFormLayout(self.advanced_widget)
-        advanced_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        advanced_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
         advanced_layout.setContentsMargins(10, 5, 0, 5)
 
         # Cloud cover range
@@ -793,14 +811,22 @@ class EarthdataDockWidget(QDockWidget):
         self.results_table.setHorizontalHeaderLabels(["ID", "Date", "Size"])
         # ID column stretches to fill space, Date and Size are fixed width
         self.results_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.Stretch
+            0, QHeaderView.ResizeMode.Stretch
         )
-        self.results_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
-        self.results_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.results_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Fixed
+        )
+        self.results_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Fixed
+        )
         self.results_table.setColumnWidth(1, 90)  # Date
         self.results_table.setColumnWidth(2, 70)  # Size
-        self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.results_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.results_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.results_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self.results_table.setMinimumHeight(120)
         # Enable tooltips for truncated text
         self.results_table.setMouseTracking(True)
@@ -821,7 +847,7 @@ class EarthdataDockWidget(QDockWidget):
         self.cog_combo.setToolTip(
             "Select a COG file to display from the selected granule"
         )
-        self.cog_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.cog_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.cog_combo.setMinimumContentsLength(15)
         cog_layout.addWidget(self.cog_combo, 1)  # Stretch to fill
         results_layout.addLayout(cog_layout)
@@ -1168,7 +1194,7 @@ class EarthdataDockWidget(QDockWidget):
                 id_item = QTableWidgetItem(str(native_id))
                 id_item.setToolTip(str(native_id))  # Show full ID on hover
                 id_item.setData(
-                    Qt.UserRole, i
+                    Qt.ItemDataRole.UserRole, i
                 )  # Stable index into _search_results/_search_gdf
                 self.results_table.setItem(i, 0, id_item)
 
@@ -1178,18 +1204,18 @@ class EarthdataDockWidget(QDockWidget):
                 # Store raw bytes for proper numeric sorting
                 size_item = NumericTableWidgetItem(str(size_display))
                 size_item.setData(
-                    Qt.UserRole, size_bytes
+                    Qt.ItemDataRole.UserRole, size_bytes
                 )  # Store raw value for sorting
                 self.results_table.setItem(i, 2, size_item)
             except Exception:
                 id_item = QTableWidgetItem(f"Item {i+1}")
                 id_item.setToolTip(f"Item {i+1}")
-                id_item.setData(Qt.UserRole, i)
+                id_item.setData(Qt.ItemDataRole.UserRole, i)
                 self.results_table.setItem(i, 0, id_item)
                 self.results_table.setItem(i, 1, QTableWidgetItem("N/A"))
 
                 size_item = NumericTableWidgetItem("N/A")
-                size_item.setData(Qt.UserRole, 0)  # Store 0 for N/A
+                size_item.setData(Qt.ItemDataRole.UserRole, 0)  # Store 0 for N/A
                 self.results_table.setItem(i, 2, size_item)
 
         # Re-enable sorting after population
@@ -1369,13 +1395,13 @@ class EarthdataDockWidget(QDockWidget):
                 # Remove layer from project
                 QgsProject.instance().removeMapLayer(self._footprints_layer.id())
             except Exception:
-                pass
+                pass  # nosec B110 - layer cleanup is best-effort
 
             # Delete the layer object to release file handles (important on Windows)
             try:
                 del self._footprints_layer
             except Exception:
-                pass
+                pass  # nosec B110 - layer cleanup is best-effort
             self._footprints_layer = None
 
             # Force garbage collection to ensure file handles are released on Windows
@@ -1435,7 +1461,7 @@ class EarthdataDockWidget(QDockWidget):
         if item is None:
             return table_row
 
-        result_idx = item.data(Qt.UserRole)
+        result_idx = item.data(Qt.ItemDataRole.UserRole)
         if result_idx is None:
             return table_row
 
@@ -1503,18 +1529,18 @@ class EarthdataDockWidget(QDockWidget):
         # Toggle sort order: if already sorted by this column, reverse it
         if header.sortIndicatorSection() == logical_index:
             new_order = (
-                Qt.DescendingOrder
-                if current_order == Qt.AscendingOrder
-                else Qt.AscendingOrder
+                Qt.SortOrder.DescendingOrder
+                if current_order == Qt.SortOrder.AscendingOrder
+                else Qt.SortOrder.AscendingOrder
             )
         else:
             # Default to ascending for new column
-            new_order = Qt.AscendingOrder
+            new_order = Qt.SortOrder.AscendingOrder
 
         # Apply the sort
         self.results_table.sortItems(logical_index, new_order)
         self._log(
-            f"Sorted by column {logical_index} ({'descending' if new_order == Qt.DescendingOrder else 'ascending'})"
+            f"Sorted by column {logical_index} ({'descending' if new_order == Qt.SortOrder.DescendingOrder else 'ascending'})"
         )
 
     def _populate_cog_dropdown(self, row_index):
@@ -1595,7 +1621,7 @@ class EarthdataDockWidget(QDockWidget):
         self.progress_bar.setRange(0, 0)
 
         # Set wait cursor
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
 
         # Read credentials from Settings input boxes as fallback
         username, password = self._get_settings_input_credentials()
@@ -1626,7 +1652,7 @@ class EarthdataDockWidget(QDockWidget):
             Tuple of (username, password) strings. Empty strings if unavailable.
         """
         username = ""
-        password = ""
+        password = ""  # nosec B105 - empty fallback when settings dock unavailable
         try:
             settings_dock = self.iface.mainWindow().findChild(
                 QDockWidget, "NASAEarthdataSettingsDock"
@@ -1637,7 +1663,7 @@ class EarthdataDockWidget(QDockWidget):
                 if hasattr(settings_dock, "password_input"):
                     password = settings_dock.password_input.text().strip()
         except Exception:
-            pass
+            pass  # nosec B110 - empty creds returned when settings dock unavailable
         return username, password
 
     def _on_cog_finished(self, results, cookie_file=None):
@@ -1773,10 +1799,10 @@ class EarthdataDockWidget(QDockWidget):
             "Confirm Download",
             f"Download {selection_msg} granule(s)?\n\n"
             f"Tip: Select specific rows in the table to download only those items.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
         # Get output directory
@@ -1824,11 +1850,11 @@ class EarthdataDockWidget(QDockWidget):
                 self,
                 "Download Complete",
                 f"Downloaded {len(files)} file(s).\n\nAdd raster files to the map?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
             )
 
-            if reply == QMessageBox.Yes:
+            if reply == QMessageBox.StandardButton.Yes:
                 for file_path in files:
                     if any(
                         str(file_path).lower().endswith(ext)

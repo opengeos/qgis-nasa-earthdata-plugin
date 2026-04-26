@@ -32,7 +32,7 @@ A QGIS plugin for searching, visualizing, and downloading NASA Earthdata product
 
 ### Prerequisites
 
-1. **QGIS 3.28 or higher**
+1. **QGIS 3.28 or higher** (compatible with QGIS 4.0 / Qt6 as well)
 2. **NASA Earthdata Account**: Sign up at [urs.earthdata.nasa.gov](https://urs.earthdata.nasa.gov/)
 
 ### Install QGIS and Google Earth Engine

@@ -190,7 +190,9 @@ class NASAEarthdata:
                 self._earthdata_dock.visibilityChanged.connect(
                     self._on_earthdata_visibility_changed
                 )
-                self.iface.addDockWidget(Qt.RightDockWidgetArea, self._earthdata_dock)
+                self.iface.addDockWidget(
+                    Qt.DockWidgetArea.RightDockWidgetArea, self._earthdata_dock
+                )
                 self._earthdata_dock.show()
                 self._earthdata_dock.raise_()
 
@@ -232,7 +234,9 @@ class NASAEarthdata:
                 self._settings_dock.visibilityChanged.connect(
                     self._on_settings_visibility_changed
                 )
-                self.iface.addDockWidget(Qt.RightDockWidgetArea, self._settings_dock)
+                self.iface.addDockWidget(
+                    Qt.DockWidgetArea.RightDockWidgetArea, self._settings_dock
+                )
                 self._settings_dock.show()
                 self._settings_dock.raise_()
                 self._connect_deps_signal()
@@ -287,16 +291,16 @@ class NASAEarthdata:
                 f"  {missing_names}\n\n"
                 f"The plugin needs these packages to search and download data.\n\n"
                 f"Would you like to open Settings to install them?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
             )
 
-            if reply == QMessageBox.Yes:
+            if reply == QMessageBox.StandardButton.Yes:
                 self._open_settings_deps_tab()
 
         except Exception:
             # Don't let dependency check errors prevent the dock from opening
-            pass
+            pass  # nosec B110 - dependency check is best-effort UX hint
 
     def _open_settings_deps_tab(self):
         """Open the Settings dock and switch to the Dependencies tab."""
@@ -311,7 +315,9 @@ class NASAEarthdata:
                 self._settings_dock.visibilityChanged.connect(
                     self._on_settings_visibility_changed
                 )
-                self.iface.addDockWidget(Qt.RightDockWidgetArea, self._settings_dock)
+                self.iface.addDockWidget(
+                    Qt.DockWidgetArea.RightDockWidgetArea, self._settings_dock
+                )
                 self._connect_deps_signal()
             except Exception as e:
                 QMessageBox.critical(
@@ -395,7 +401,7 @@ class NASAEarthdata:
 
         try:
             dialog = UpdateCheckerDialog(self.plugin_dir, self.iface.mainWindow())
-            dialog.exec_()
+            dialog.exec()
         except Exception as e:
             QMessageBox.critical(
                 self.iface.mainWindow(),
