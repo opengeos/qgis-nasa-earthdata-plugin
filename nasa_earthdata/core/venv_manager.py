@@ -994,7 +994,7 @@ def import_earthaccess():
 
         message = (
             f"earthaccess {version} is installed but failed to import: {exc}. "
-            "Try Reinstall Dependencies."
+            "Try Install Dependencies in Settings."
         )
         _log(
             f"{message} QGIS Python: {sys.version}",
