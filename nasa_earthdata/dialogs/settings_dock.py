@@ -30,6 +30,14 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.PyQt.QtGui import QFont
 
+from .chat_dock import DEFAULT_MODELS, PROVIDERS
+
+
+def _enum_value(cls, enum_name, member_name):
+    """Return an enum member from either scoped or legacy Qt APIs."""
+    container = getattr(cls, enum_name, cls)
+    return getattr(container, member_name)
+
 
 class SettingsDockWidget(QDockWidget):
     """A settings panel for configuring NASA Earthdata plugin options."""
@@ -89,6 +97,10 @@ class SettingsDockWidget(QDockWidget):
         # Credentials tab
         credentials_tab = self._create_credentials_tab()
         self.tab_widget.addTab(credentials_tab, "Credentials")
+
+        # Model tab
+        model_tab = self._create_model_tab()
+        self.tab_widget.addTab(model_tab, "Model")
 
         # General settings tab
         general_tab = self._create_general_tab()
@@ -184,6 +196,87 @@ class SettingsDockWidget(QDockWidget):
 
         layout.addWidget(netrc_group)
 
+        layout.addStretch()
+        return widget
+
+    def _create_model_tab(self):
+        """Create the GeoAgent model provider and credential tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        model_group = QGroupBox("GeoAgent Provider")
+        form = QFormLayout(model_group)
+
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems(PROVIDERS)
+        self.provider_combo.setMinimumContentsLength(10)
+        self.provider_combo.setSizeAdjustPolicy(
+            _enum_value(
+                QComboBox,
+                "SizeAdjustPolicy",
+                "AdjustToMinimumContentsLengthWithIcon",
+            )
+        )
+        self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
+        form.addRow("Provider:", self.provider_combo)
+
+        self.model_input = QLineEdit()
+        self.model_input.setPlaceholderText("Provider default")
+        form.addRow("Model:", self.model_input)
+
+        self.fast_check = QCheckBox("Use fast GeoAgent prompt")
+        form.addRow("", self.fast_check)
+
+        self.max_tokens_spin = QSpinBox()
+        self.max_tokens_spin.setRange(256, 32768)
+        self.max_tokens_spin.setValue(4096)
+        self.max_tokens_spin.setSingleStep(256)
+        form.addRow("Max tokens:", self.max_tokens_spin)
+
+        layout.addWidget(model_group)
+
+        credentials_group = QGroupBox("Provider Credentials and Hosts")
+        credentials_form = QFormLayout(credentials_group)
+
+        password_mode = getattr(getattr(QLineEdit, "EchoMode", QLineEdit), "Password")
+
+        self.openai_key_input = QLineEdit()
+        self.openai_key_input.setEchoMode(password_mode)
+        credentials_form.addRow("OpenAI API key:", self.openai_key_input)
+
+        self.anthropic_key_input = QLineEdit()
+        self.anthropic_key_input.setEchoMode(password_mode)
+        credentials_form.addRow("Anthropic API key:", self.anthropic_key_input)
+
+        self.gemini_key_input = QLineEdit()
+        self.gemini_key_input.setEchoMode(password_mode)
+        credentials_form.addRow("Gemini API key:", self.gemini_key_input)
+
+        self.aws_region_input = QLineEdit()
+        self.aws_region_input.setPlaceholderText("e.g. us-east-1")
+        credentials_form.addRow("AWS region:", self.aws_region_input)
+
+        self.ollama_host_input = QLineEdit()
+        self.ollama_host_input.setPlaceholderText("http://127.0.0.1:11434")
+        credentials_form.addRow("Ollama host:", self.ollama_host_input)
+
+        self.litellm_key_input = QLineEdit()
+        self.litellm_key_input.setEchoMode(password_mode)
+        credentials_form.addRow("LiteLLM API key:", self.litellm_key_input)
+
+        self.litellm_base_url_input = QLineEdit()
+        self.litellm_base_url_input.setPlaceholderText("https://proxy.example.com")
+        credentials_form.addRow("LiteLLM base URL:", self.litellm_base_url_input)
+
+        layout.addWidget(credentials_group)
+
+        note = QLabel(
+            "These values are used by the NASA Earthdata AI Assistant and saved "
+            "in QGIS settings."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("font-size: 10px; color: gray;")
+        layout.addWidget(note)
         layout.addStretch()
         return widget
 
@@ -320,9 +413,9 @@ class SettingsDockWidget(QDockWidget):
 
         # Create status labels for each package
         self._deps_labels = {}
-        from ..core.venv_manager import REQUIRED_PACKAGES
+        from ..core.venv_manager import INSTALL_PACKAGES
 
-        for package_name, _version_spec in REQUIRED_PACKAGES:
+        for package_name, _version_spec in INSTALL_PACKAGES:
             label = QLabel("Checking...")
             label.setStyleSheet("color: gray;")
             self._deps_labels[package_name] = label
@@ -370,7 +463,7 @@ class SettingsDockWidget(QDockWidget):
         """Refresh the dependency status display."""
         from ..core.venv_manager import check_dependencies
 
-        all_ok, missing, installed = check_dependencies()
+        all_ok, missing, installed = check_dependencies(include_assistant=True)
 
         for package_name, version in installed:
             if package_name in self._deps_labels:
@@ -665,6 +758,10 @@ class SettingsDockWidget(QDockWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to clear cache:\n{e}")
 
+    def _on_provider_changed(self, provider):
+        """Update the model field when the provider changes."""
+        self.model_input.setText(DEFAULT_MODELS.get(provider, ""))
+
     def _load_settings(self):
         """Load settings from QSettings."""
         # Credentials precedence: .netrc -> environment -> QSettings username
@@ -704,6 +801,44 @@ class SettingsDockWidget(QDockWidget):
                 "Using credentials from EARTHDATA_USERNAME/EARTHDATA_PASSWORD"
             )
             self.creds_status_label.setStyleSheet("color: green;")
+
+        # Model
+        provider = self.settings.value(
+            f"{self.SETTINGS_PREFIX}provider", "openai", type=str
+        )
+        index = self.provider_combo.findText(provider)
+        self.provider_combo.setCurrentIndex(index if index >= 0 else 1)
+        model = self.settings.value(f"{self.SETTINGS_PREFIX}model", "", type=str)
+        self.model_input.setText(model or DEFAULT_MODELS.get(provider, ""))
+        self.fast_check.setChecked(
+            self.settings.value(f"{self.SETTINGS_PREFIX}fast_mode", False, type=bool)
+        )
+        self.max_tokens_spin.setValue(
+            self.settings.value(f"{self.SETTINGS_PREFIX}max_tokens", 4096, type=int)
+        )
+        self.openai_key_input.setText(
+            self.settings.value(f"{self.SETTINGS_PREFIX}openai_api_key", "", type=str)
+        )
+        self.anthropic_key_input.setText(
+            self.settings.value(
+                f"{self.SETTINGS_PREFIX}anthropic_api_key", "", type=str
+            )
+        )
+        self.gemini_key_input.setText(
+            self.settings.value(f"{self.SETTINGS_PREFIX}gemini_api_key", "", type=str)
+        )
+        self.aws_region_input.setText(
+            self.settings.value(f"{self.SETTINGS_PREFIX}aws_region", "", type=str)
+        )
+        self.ollama_host_input.setText(
+            self.settings.value(f"{self.SETTINGS_PREFIX}ollama_host", "", type=str)
+        )
+        self.litellm_key_input.setText(
+            self.settings.value(f"{self.SETTINGS_PREFIX}litellm_api_key", "", type=str)
+        )
+        self.litellm_base_url_input.setText(
+            self.settings.value(f"{self.SETTINGS_PREFIX}litellm_base_url", "", type=str)
+        )
 
         # General
         self.download_dir_input.setText(
@@ -776,6 +911,41 @@ class SettingsDockWidget(QDockWidget):
             )
             self.creds_status_label.setStyleSheet("color: orange;")
 
+        # Model
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}provider", self.provider_combo.currentText()
+        )
+        self.settings.setValue(f"{self.SETTINGS_PREFIX}model", self.model_input.text())
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}fast_mode", self.fast_check.isChecked()
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}max_tokens", self.max_tokens_spin.value()
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}openai_api_key", self.openai_key_input.text()
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}anthropic_api_key",
+            self.anthropic_key_input.text(),
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}gemini_api_key", self.gemini_key_input.text()
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}aws_region", self.aws_region_input.text()
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}ollama_host", self.ollama_host_input.text()
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}litellm_api_key", self.litellm_key_input.text()
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}litellm_base_url",
+            self.litellm_base_url_input.text(),
+        )
+
         # General
         self.settings.setValue(
             f"{self.SETTINGS_PREFIX}download_dir", self.download_dir_input.text()
@@ -835,6 +1005,19 @@ class SettingsDockWidget(QDockWidget):
         # Credentials
         self.username_input.clear()
         self.password_input.clear()
+
+        # Model
+        self.provider_combo.setCurrentText("openai")
+        self.model_input.setText(DEFAULT_MODELS["openai"])
+        self.fast_check.setChecked(False)
+        self.max_tokens_spin.setValue(4096)
+        self.openai_key_input.clear()
+        self.anthropic_key_input.clear()
+        self.gemini_key_input.clear()
+        self.aws_region_input.clear()
+        self.ollama_host_input.clear()
+        self.litellm_key_input.clear()
+        self.litellm_base_url_input.clear()
 
         # General
         self.download_dir_input.clear()
