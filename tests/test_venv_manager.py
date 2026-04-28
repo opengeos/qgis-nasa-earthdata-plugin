@@ -42,9 +42,7 @@ def test_import_earthaccess_classifies_missing_dist_info(
     force_earthaccess_import_failure, monkeypatch
 ):
     """When no dist-info is present, raise EarthaccessNotInstalledError."""
-    monkeypatch.setattr(
-        venv_manager, "_earthaccess_dist_info_present", lambda: False
-    )
+    monkeypatch.setattr(venv_manager, "_earthaccess_dist_info_present", lambda: False)
 
     with pytest.raises(venv_manager.EarthaccessNotInstalledError) as exc_info:
         venv_manager.import_earthaccess()
@@ -58,9 +56,7 @@ def test_import_earthaccess_classifies_broken_install(
     force_earthaccess_import_failure, monkeypatch
 ):
     """When dist-info is present but import fails, raise EarthaccessImportError."""
-    monkeypatch.setattr(
-        venv_manager, "_earthaccess_dist_info_present", lambda: True
-    )
+    monkeypatch.setattr(venv_manager, "_earthaccess_dist_info_present", lambda: True)
     # Avoid touching subprocess/QGIS log during the test.
     monkeypatch.setattr(
         venv_manager, "_log_earthaccess_import_failure", lambda exc: None
