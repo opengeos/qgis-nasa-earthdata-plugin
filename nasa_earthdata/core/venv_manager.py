@@ -14,6 +14,7 @@ import shutil
 import subprocess  # nosec B404 - only invoked with hard-coded internal commands
 import sys
 import time
+import traceback
 from typing import Tuple, Optional, Callable, List
 
 from qgis.core import QgsMessageLog, Qgis
@@ -26,6 +27,47 @@ REQUIRED_PACKAGES = [
     ("pandas", ""),
     ("geopandas", ""),
 ]
+
+
+class EarthaccessNotInstalledError(ImportError):
+    """Raised when the ``earthaccess`` package is not present in the venv.
+
+    Inherits from :class:`ImportError` so that callers using a generic
+    ``except Exception``/``except ImportError`` still see a useful message
+    via :func:`str`.
+    """
+
+    def __init__(self, user_message: str):
+        """Initialize the error.
+
+        Args:
+            user_message: Short string suitable for display in a dialog
+                or status label.
+        """
+        super().__init__(user_message)
+        self.user_message = user_message
+
+
+class EarthaccessImportError(ImportError):
+    """Raised when ``earthaccess`` is installed but fails to import.
+
+    The dist-info directory is present in the venv site-packages, but the
+    actual ``import earthaccess`` raises (typically because of an ABI
+    mismatch with QGIS's Python or a partially installed transitive
+    dependency). Inherits from :class:`ImportError` so generic ``except``
+    handlers still surface :attr:`user_message` via :func:`str`.
+    """
+
+    def __init__(self, user_message: str, original: BaseException):
+        """Initialize the error.
+
+        Args:
+            user_message: Short string suitable for display to the user.
+            original: The underlying exception raised by ``import``.
+        """
+        super().__init__(user_message)
+        self.user_message = user_message
+        self.original = original
 
 
 def _log(message, level=Qgis.MessageLevel.Info):
@@ -968,6 +1010,110 @@ def ensure_venv_packages_available():
     return True
 
 
+def _earthaccess_dist_info_present():
+    """Return True if an ``earthaccess`` dist-info directory exists in the venv.
+
+    A present dist-info means ``importlib.metadata.version("earthaccess")``
+    will succeed even though Python may not actually be able to import the
+    package (for example, because of an ABI mismatch with QGIS's Python).
+
+    Returns:
+        True if an ``earthaccess-*.dist-info`` directory was found.
+    """
+    site_packages = get_venv_site_packages()
+    if site_packages is None or not os.path.isdir(site_packages):
+        return False
+    try:
+        for entry in os.listdir(site_packages):
+            if entry.startswith("earthaccess") and entry.endswith(".dist-info"):
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _log_earthaccess_import_failure(original):
+    """Log full diagnostics for a failed ``import earthaccess``.
+
+    Args:
+        original: The exception raised by the failed import.
+    """
+    site_packages = get_venv_site_packages()
+    venv_python = get_venv_python_path()
+
+    venv_version = "<unknown>"
+    if os.path.isfile(venv_python):
+        try:
+            result = subprocess.run(  # nosec B603 - hard-coded internal args
+                [venv_python, "-c", "import sys; print(sys.version)"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=_get_clean_env_for_venv(),
+                **_get_subprocess_kwargs(),
+            )
+            if result.returncode == 0:
+                venv_version = result.stdout.strip() or "<empty>"
+            else:
+                venv_version = (
+                    f"<probe failed: rc={result.returncode}, "
+                    f"err={(result.stderr or '').strip()[:200]}>"
+                )
+        except Exception as e:  # noqa: BLE001 - diagnostic best-effort
+            venv_version = f"<venv python unreachable: {e}>"
+
+    _log(
+        "earthaccess is installed but failed to import.\n"
+        f"  Original error: {type(original).__name__}: {original}\n"
+        f"  QGIS Python:    {sys.version}\n"
+        f"  Venv Python:    {venv_version}\n"
+        f"  Site-packages:  {site_packages}\n"
+        "  Traceback:\n"
+        f"{traceback.format_exc()}",
+        Qgis.MessageLevel.Critical,
+    )
+
+
+def import_earthaccess():
+    """Import the ``earthaccess`` package, with friendly errors on failure.
+
+    Calls :func:`ensure_venv_packages_available` to put the venv
+    site-packages on ``sys.path``, then attempts ``import earthaccess``.
+
+    Returns:
+        The imported ``earthaccess`` module.
+
+    Raises:
+        EarthaccessNotInstalledError: If no ``earthaccess`` dist-info is
+            present in the venv site-packages.
+        EarthaccessImportError: If the dist-info is present but the import
+            itself fails (broken install, ABI mismatch, etc.). Full
+            diagnostics are logged to the QGIS message log.
+    """
+    ensure_venv_packages_available()
+
+    try:
+        import earthaccess  # noqa: WPS433 - intentional runtime import
+
+        return earthaccess
+    except ImportError as exc:
+        if not _earthaccess_dist_info_present():
+            raise EarthaccessNotInstalledError(
+                "earthaccess package not installed - "
+                "please run Install Dependencies in Settings."
+            ) from exc
+
+        _log_earthaccess_import_failure(exc)
+        raise EarthaccessImportError(
+            (
+                "earthaccess is installed but failed to import: "
+                f"{exc}. See View > Panels > Log Messages > "
+                "'NASA Earthdata' for details. Try Reinstall Dependencies."
+            ),
+            exc,
+        ) from exc
+
+
 # ---------------------------------------------------------------------------
 # Status checking
 # ---------------------------------------------------------------------------
@@ -1007,32 +1153,92 @@ def get_venv_status():
     return True, "Virtual environment ready"
 
 
+def _probe_earthaccess_in_venv():
+    """Try to ``import earthaccess`` in the venv's own Python.
+
+    The Dependencies tab refreshes synchronously on the UI thread, so we
+    deliberately probe in a subprocess (the venv Python) rather than the
+    QGIS process: a broken transitive dep can otherwise leak partial
+    state into ``sys.modules``. The venv probe still catches the common
+    failures (partial install, broken transitive deps).
+
+    If the venv Python does not exist (yet), there is nothing to probe;
+    return success so a system-wide install of ``earthaccess`` is still
+    reported as installed by :func:`check_dependencies`.
+
+    Returns:
+        A tuple of (ok: bool, error_excerpt: str). ``error_excerpt`` is
+        empty when ``ok`` is True.
+    """
+    venv_python = get_venv_python_path()
+    if not os.path.isfile(venv_python):
+        return True, ""
+
+    try:
+        result = subprocess.run(  # nosec B603 - hard-coded internal args
+            [venv_python, "-c", _get_verification_code("earthaccess")],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=_get_clean_env_for_venv(),
+            **_get_subprocess_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        return False, "import probe timed out"
+    except Exception as e:  # noqa: BLE001 - diagnostic best-effort
+        return False, f"probe failed: {e}"
+
+    if result.returncode == 0:
+        return True, ""
+
+    err = (result.stderr or result.stdout or "").strip()
+    return False, err[-200:] if err else f"exit code {result.returncode}"
+
+
 def check_dependencies():
     """Check if all required packages are installed and importable.
 
-    Attempts to use importlib.metadata after ensuring venv packages
-    are on sys.path. This is a lightweight check suitable for UI display.
+    Uses :mod:`importlib.metadata` after ensuring venv packages are on
+    ``sys.path`` to enumerate installed/missing packages. For
+    ``earthaccess`` it also runs a subprocess probe in the venv's Python
+    so the UI does not lie when the dist-info is present but the package
+    cannot actually be imported (issue #26).
 
     Returns:
-        A tuple of (all_ok, missing, installed) where:
-            all_ok: True if all required packages are installed.
+        A tuple of (all_ok, missing, installed, broken) where:
+            all_ok: True if all required packages are installed and (for
+                earthaccess) actually importable.
             missing: List of (package_name, version_spec) for missing packages.
-            installed: List of (package_name, version_string) for installed packages.
+            installed: List of (package_name, version_string) for installed
+                and importable packages.
+            broken: List of (package_name, version_string, error_excerpt)
+                for packages whose dist-info is present but whose import
+                fails. Currently only ``earthaccess`` is probed.
     """
     ensure_venv_packages_available()
 
     missing = []
     installed = []
+    broken = []
 
     for package_name, version_spec in REQUIRED_PACKAGES:
         try:
             version = importlib.metadata.version(package_name)
-            installed.append((package_name, version))
         except importlib.metadata.PackageNotFoundError:
             missing.append((package_name, version_spec))
+            continue
 
-    all_ok = len(missing) == 0
-    return all_ok, missing, installed
+        if package_name == "earthaccess":
+            ok, err = _probe_earthaccess_in_venv()
+            if ok:
+                installed.append((package_name, version))
+            else:
+                broken.append((package_name, version, err))
+        else:
+            installed.append((package_name, version))
+
+    all_ok = not missing and not broken
+    return all_ok, missing, installed, broken
 
 
 # ---------------------------------------------------------------------------
