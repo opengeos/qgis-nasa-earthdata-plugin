@@ -224,10 +224,9 @@ class DataSearchWorker(QThread):
         """Execute the search."""
         try:
             self.progress.emit("Importing earthaccess...")
-            from ..core.venv_manager import ensure_venv_packages_available
+            from ..core.venv_manager import import_earthaccess
 
-            ensure_venv_packages_available()
-            import earthaccess
+            earthaccess = import_earthaccess()
 
             self.progress.emit("Searching NASA Earthdata...")
 
@@ -395,10 +394,9 @@ class COGDisplayWorker(QThread):
     def run(self):
         """Authenticate, download COG files to temp dir, and emit paths."""
         try:
-            from ..core.venv_manager import ensure_venv_packages_available
+            from ..core.venv_manager import import_earthaccess
 
-            ensure_venv_packages_available()
-            import earthaccess
+            earthaccess = import_earthaccess()
 
             self.progress.emit("Authenticating with NASA Earthdata...")
             if not self._login(earthaccess):
@@ -508,10 +506,9 @@ class DataDownloadWorker(QThread):
     def run(self):
         """Execute the download."""
         try:
-            from ..core.venv_manager import ensure_venv_packages_available
+            from ..core.venv_manager import import_earthaccess
 
-            ensure_venv_packages_available()
-            import earthaccess
+            earthaccess = import_earthaccess()
 
             self.progress.emit(10, "Authenticating...")
 

@@ -496,10 +496,9 @@ class SettingsDockWidget(QDockWidget):
         self.creds_status_label.setStyleSheet("color: blue;")
 
         try:
-            from ..core.venv_manager import ensure_venv_packages_available
+            from ..core.venv_manager import import_earthaccess
 
-            ensure_venv_packages_available()
-            import earthaccess
+            earthaccess = import_earthaccess()
 
             # Set environment variables for earthaccess
             os.environ["EARTHDATA_USERNAME"] = username
@@ -521,8 +520,8 @@ class SettingsDockWidget(QDockWidget):
                 self.creds_status_label.setText("✗ Authentication failed")
                 self.creds_status_label.setStyleSheet("color: red;")
 
-        except ImportError:
-            self.creds_status_label.setText("earthaccess package not installed")
+        except ImportError as e:
+            self.creds_status_label.setText(str(e)[:200])
             self.creds_status_label.setStyleSheet("color: red;")
         except Exception as e:
             self.creds_status_label.setText(f"Error: {str(e)[:50]}")

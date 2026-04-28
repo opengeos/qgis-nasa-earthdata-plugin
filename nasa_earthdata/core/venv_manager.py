@@ -968,6 +968,41 @@ def ensure_venv_packages_available():
     return True
 
 
+def import_earthaccess():
+    """Import ``earthaccess`` with a clear message when import fails.
+
+    Returns:
+        The imported ``earthaccess`` module.
+
+    Raises:
+        ImportError: If ``earthaccess`` is missing or installed but broken.
+    """
+    ensure_venv_packages_available()
+
+    try:
+        import earthaccess  # noqa: WPS433 - intentional runtime import
+
+        return earthaccess
+    except ImportError as exc:
+        try:
+            version = importlib.metadata.version("earthaccess")
+        except importlib.metadata.PackageNotFoundError:
+            raise ImportError(
+                "earthaccess package not installed - "
+                "please run Install Dependencies in Settings."
+            ) from exc
+
+        message = (
+            f"earthaccess {version} is installed but failed to import: {exc}. "
+            "Try Install Dependencies in Settings."
+        )
+        _log(
+            f"{message} QGIS Python: {sys.version}",
+            Qgis.MessageLevel.Critical,
+        )
+        raise ImportError(message) from exc
+
+
 # ---------------------------------------------------------------------------
 # Status checking
 # ---------------------------------------------------------------------------
@@ -1008,7 +1043,7 @@ def get_venv_status():
 
 
 def check_dependencies():
-    """Check if all required packages are installed and importable.
+    """Check if all required packages are installed.
 
     Attempts to use importlib.metadata after ensuring venv packages
     are on sys.path. This is a lightweight check suitable for UI display.
