@@ -411,11 +411,23 @@ class SettingsDockWidget(QDockWidget):
         status_group = QGroupBox("Package Status")
         self._deps_status_layout = QFormLayout(status_group)
 
-        # Create status labels for each package
+        # Create status labels for each package, grouped by required vs optional.
         self._deps_labels = {}
-        from ..core.venv_manager import INSTALL_PACKAGES
+        from ..core.venv_manager import ASSISTANT_PACKAGES, REQUIRED_PACKAGES
 
-        for package_name, _version_spec in INSTALL_PACKAGES:
+        required_header = QLabel("Required (NASA Earthdata core):")
+        required_header.setStyleSheet("font-weight: bold;")
+        self._deps_status_layout.addRow(required_header)
+        for package_name, _version_spec in REQUIRED_PACKAGES:
+            label = QLabel("Checking...")
+            label.setStyleSheet("color: gray;")
+            self._deps_labels[package_name] = label
+            self._deps_status_layout.addRow(f"{package_name}:", label)
+
+        assistant_header = QLabel("AI Assistant (optional):")
+        assistant_header.setStyleSheet("font-weight: bold; margin-top: 6px;")
+        self._deps_status_layout.addRow(assistant_header)
+        for package_name, _version_spec in ASSISTANT_PACKAGES:
             label = QLabel("Checking...")
             label.setStyleSheet("color: gray;")
             self._deps_labels[package_name] = label
@@ -463,6 +475,7 @@ class SettingsDockWidget(QDockWidget):
         """Refresh the dependency status display."""
         from ..core.venv_manager import check_dependencies
 
+        required_ok, _, _ = check_dependencies(include_assistant=False)
         all_ok, missing, installed = check_dependencies(include_assistant=True)
 
         for package_name, version in installed:
@@ -480,6 +493,10 @@ class SettingsDockWidget(QDockWidget):
         self.install_deps_btn.setEnabled(not all_ok)
         if all_ok:
             self.install_deps_btn.setText("All Dependencies Installed")
+        elif required_ok:
+            self.install_deps_btn.setText(
+                f"Install AI Assistant Packages ({len(missing)} missing)"
+            )
         else:
             self.install_deps_btn.setText(
                 f"Install Dependencies ({len(missing)} missing)"

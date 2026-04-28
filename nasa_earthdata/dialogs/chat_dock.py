@@ -685,12 +685,35 @@ class ChatDockWidget(QDockWidget):
         except Exception:
             pass  # nosec B110 - best-effort cleanup on dock dismissal
 
+    def shutdown(self):
+        """Stop the status timer and wait for any in-flight chat worker.
+
+        Called from the plugin unload path and ``closeEvent`` so the dock
+        does not get torn down while a ``QThread`` is still running, which
+        would crash QGIS with "QThread: Destroyed while thread is still
+        running".
+        """
+        self._shutdown_running_state()
+        worker = self._worker
+        if worker is None:
+            return
+        try:
+            worker.finished.disconnect(self._on_worker_finished)
+        except (TypeError, RuntimeError):
+            pass  # nosec B110 - signal may already be disconnected
+        try:
+            if worker.isRunning():
+                worker.wait(5000)
+        except RuntimeError:
+            pass  # nosec B110 - worker C++ object already deleted
+        self._worker = None
+
     def hideEvent(self, event):
         """Stop the animated status timer when the dock is hidden."""
         self._shutdown_running_state()
         super().hideEvent(event)
 
     def closeEvent(self, event):
-        """Stop the animated status timer when the dock is closed."""
-        self._shutdown_running_state()
+        """Stop the animated status timer and any worker when closed."""
+        self.shutdown()
         super().closeEvent(event)

@@ -171,6 +171,12 @@ class NASAEarthdata:
             self._earthdata_dock = None
 
         if self._chat_dock:
+            shutdown = getattr(self._chat_dock, "shutdown", None)
+            if callable(shutdown):
+                try:
+                    shutdown()
+                except Exception:
+                    pass  # nosec B110 - best-effort worker shutdown on unload
             self.iface.removeDockWidget(self._chat_dock)
             self._chat_dock.deleteLater()
             self._chat_dock = None
