@@ -1,10 +1,4 @@
-"""Tests for ``nasa_earthdata.core.venv_manager`` error classification.
-
-These tests do NOT exercise a real install. They monkey-patch the
-helpers used by ``import_earthaccess`` so we can assert the right
-classification (genuinely missing vs. installed-but-broken) without
-fabricating a working venv.
-"""
+"""Tests for ``nasa_earthdata.core.venv_manager`` import helpers."""
 
 import builtins
 import sys
@@ -38,41 +32,42 @@ def force_earthaccess_import_failure(monkeypatch):
     yield
 
 
-def test_import_earthaccess_classifies_missing_dist_info(
+def test_import_earthaccess_reports_missing_package(
     force_earthaccess_import_failure, monkeypatch
 ):
-    """When no dist-info is present, raise EarthaccessNotInstalledError."""
-    monkeypatch.setattr(venv_manager, "_earthaccess_dist_info_present", lambda: False)
+    """When metadata is missing, report that earthaccess is not installed."""
 
-    with pytest.raises(venv_manager.EarthaccessNotInstalledError) as exc_info:
+    def missing_version(name):
+        raise venv_manager.importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(venv_manager.importlib.metadata, "version", missing_version)
+
+    with pytest.raises(ImportError) as exc_info:
         venv_manager.import_earthaccess()
 
-    assert "not installed" in exc_info.value.user_message.lower()
-    # Inherits from ImportError so generic handlers still catch it.
-    assert isinstance(exc_info.value, ImportError)
+    assert "not installed" in str(exc_info.value).lower()
 
 
-def test_import_earthaccess_classifies_broken_install(
+def test_import_earthaccess_reports_broken_install(
     force_earthaccess_import_failure, monkeypatch
 ):
-    """When dist-info is present but import fails, raise EarthaccessImportError."""
-    monkeypatch.setattr(venv_manager, "_earthaccess_dist_info_present", lambda: True)
-    # Avoid touching subprocess/QGIS log during the test.
+    """When metadata exists but import fails, report the import error."""
     monkeypatch.setattr(
-        venv_manager, "_log_earthaccess_import_failure", lambda exc: None
+        venv_manager.importlib.metadata, "version", lambda name: "0.14.0"
     )
+    monkeypatch.setattr(venv_manager, "_log", lambda *args, **kwargs: None)
 
-    with pytest.raises(venv_manager.EarthaccessImportError) as exc_info:
+    with pytest.raises(ImportError) as exc_info:
         venv_manager.import_earthaccess()
 
-    assert "failed to import" in exc_info.value.user_message.lower()
-    assert isinstance(exc_info.value, ImportError)
-    assert exc_info.value.original is not None
+    message = str(exc_info.value).lower()
+    assert "0.14.0" in message
+    assert "failed to import" in message
+    assert "simulated: earthaccess fails to import" in message
 
 
-def test_check_dependencies_returns_four_tuple(monkeypatch):
-    """``check_dependencies`` must return (all_ok, missing, installed, broken)."""
-    # Force the metadata lookups and probe to deterministic values.
+def test_check_dependencies_returns_three_tuple(monkeypatch):
+    """``check_dependencies`` returns (all_ok, missing, installed)."""
     monkeypatch.setattr(venv_manager, "ensure_venv_packages_available", lambda: True)
 
     def fake_version(name):
@@ -83,17 +78,12 @@ def test_check_dependencies_returns_four_tuple(monkeypatch):
         raise venv_manager.importlib.metadata.PackageNotFoundError(name)
 
     monkeypatch.setattr(venv_manager.importlib.metadata, "version", fake_version)
-    monkeypatch.setattr(
-        venv_manager,
-        "_probe_earthaccess_in_venv",
-        lambda: (False, "ImportError: cannot import name foo"),
-    )
 
     result = venv_manager.check_dependencies()
-    assert len(result) == 4
-    all_ok, missing, installed, broken = result
+    assert len(result) == 3
+    all_ok, missing, installed = result
 
     assert all_ok is False
     assert ("geopandas", "") in missing
+    assert ("earthaccess", "0.14.0") in installed
     assert ("pandas", "2.2.0") in installed
-    assert any(name == "earthaccess" for name, _, _ in broken)

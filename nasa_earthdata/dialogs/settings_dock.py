@@ -370,7 +370,7 @@ class SettingsDockWidget(QDockWidget):
         """Refresh the dependency status display."""
         from ..core.venv_manager import check_dependencies
 
-        all_ok, missing, installed, broken = check_dependencies()
+        all_ok, missing, installed = check_dependencies()
 
         for package_name, version in installed:
             if package_name in self._deps_labels:
@@ -384,26 +384,12 @@ class SettingsDockWidget(QDockWidget):
                 self._deps_labels[package_name].setText("Not installed")
                 self._deps_labels[package_name].setStyleSheet("color: red;")
 
-        for package_name, version, _err in broken:
-            if package_name in self._deps_labels:
-                self._deps_labels[package_name].setText(
-                    f"v{version} (broken - reinstall)"
-                )
-                self._deps_labels[package_name].setStyleSheet(
-                    "color: red; font-weight: bold;"
-                )
-
         self.install_deps_btn.setEnabled(not all_ok)
         if all_ok:
             self.install_deps_btn.setText("All Dependencies Installed")
-        elif broken and not missing:
-            self.install_deps_btn.setText(
-                f"Reinstall Dependencies ({len(broken)} broken)"
-            )
         else:
-            problem_count = len(missing) + len(broken)
             self.install_deps_btn.setText(
-                f"Install Dependencies ({problem_count} missing)"
+                f"Install Dependencies ({len(missing)} missing)"
             )
 
     def _install_dependencies(self):
@@ -510,11 +496,7 @@ class SettingsDockWidget(QDockWidget):
         self.creds_status_label.setStyleSheet("color: blue;")
 
         try:
-            from ..core.venv_manager import (
-                EarthaccessImportError,
-                EarthaccessNotInstalledError,
-                import_earthaccess,
-            )
+            from ..core.venv_manager import import_earthaccess
 
             earthaccess = import_earthaccess()
 
@@ -538,13 +520,8 @@ class SettingsDockWidget(QDockWidget):
                 self.creds_status_label.setText("✗ Authentication failed")
                 self.creds_status_label.setStyleSheet("color: red;")
 
-        except EarthaccessNotInstalledError as e:
-            self.creds_status_label.setText(e.user_message)
-            self.creds_status_label.setStyleSheet("color: red;")
-        except EarthaccessImportError as e:
-            # Truncate so it fits the status label; full traceback is in
-            # the QGIS Log Messages panel under "NASA Earthdata".
-            self.creds_status_label.setText(e.user_message[:200])
+        except ImportError as e:
+            self.creds_status_label.setText(str(e)[:200])
             self.creds_status_label.setStyleSheet("color: red;")
         except Exception as e:
             self.creds_status_label.setText(f"Error: {str(e)[:50]}")
