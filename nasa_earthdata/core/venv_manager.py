@@ -27,6 +27,17 @@ REQUIRED_PACKAGES = [
     ("geopandas", ""),
 ]
 
+ASSISTANT_PACKAGES = [
+    ("geoagent", "[providers]>=1.0.0"),
+    ("openai", ">=1.0"),
+    ("anthropic", ">=0.40"),
+    ("google-genai", ">=1.0"),
+    ("ollama", ">=0.3"),
+    ("strands-agents", "[litellm]>=1.37"),
+]
+
+INSTALL_PACKAGES = REQUIRED_PACKAGES + ASSISTANT_PACKAGES
+
 
 def _log(message, level=Qgis.MessageLevel.Info):
     """Log a message to the QGIS message log.
@@ -497,7 +508,7 @@ def install_dependencies(venv_dir=None, progress_callback=None, cancel_check=Non
     # Build the full list of package specs for batch installation
     pkg_specs = []
     pkg_names = []
-    for package_name, version_spec in REQUIRED_PACKAGES:
+    for package_name, version_spec in INSTALL_PACKAGES:
         pkg_spec = f"{package_name}{version_spec}" if version_spec else package_name
         pkg_specs.append(pkg_spec)
         pkg_names.append(package_name)
@@ -506,7 +517,7 @@ def install_dependencies(venv_dir=None, progress_callback=None, cancel_check=Non
         return False, "Installation cancelled."
 
     # Scale timeout with number of packages (600s per package)
-    total = len(REQUIRED_PACKAGES)
+    total = len(INSTALL_PACKAGES)
     timeout = 600 * total
 
     if progress_callback:
@@ -1042,7 +1053,7 @@ def get_venv_status():
     return True, "Virtual environment ready"
 
 
-def check_dependencies():
+def check_dependencies(include_assistant=False):
     """Check if all required packages are installed.
 
     Attempts to use importlib.metadata after ensuring venv packages
@@ -1059,7 +1070,8 @@ def check_dependencies():
     missing = []
     installed = []
 
-    for package_name, version_spec in REQUIRED_PACKAGES:
+    packages = INSTALL_PACKAGES if include_assistant else REQUIRED_PACKAGES
+    for package_name, version_spec in packages:
         try:
             version = importlib.metadata.version(package_name)
             installed.append((package_name, version))
@@ -1068,6 +1080,12 @@ def check_dependencies():
 
     all_ok = len(missing) == 0
     return all_ok, missing, installed
+
+
+def assistant_dependencies_met():
+    """Return True when GeoAgent and provider packages are installed."""
+    all_ok, _missing, _installed = check_dependencies(include_assistant=True)
+    return all_ok
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ class NASAEarthdata:
 
         # Dock widgets (lazy loaded)
         self._earthdata_dock = None
+        self._chat_dock = None
         self._settings_dock = None
         self._deps_signal_connected = False
 
@@ -116,6 +117,15 @@ class NASAEarthdata:
             parent=self.iface.mainWindow(),
         )
 
+        self.chat_action = self.add_action(
+            main_icon,
+            "AI Assistant",
+            self.toggle_chat_dock,
+            status_tip="Ask GeoAgent to search and visualize NASA Earthdata",
+            checkable=True,
+            parent=self.iface.mainWindow(),
+        )
+
         # Add Settings Panel action (checkable for dock toggle)
         self.settings_action = self.add_action(
             settings_icon,
@@ -159,6 +169,17 @@ class NASAEarthdata:
             self.iface.removeDockWidget(self._earthdata_dock)
             self._earthdata_dock.deleteLater()
             self._earthdata_dock = None
+
+        if self._chat_dock:
+            shutdown = getattr(self._chat_dock, "shutdown", None)
+            if callable(shutdown):
+                try:
+                    shutdown()
+                except Exception:
+                    pass  # nosec B110 - best-effort worker shutdown on unload
+            self.iface.removeDockWidget(self._chat_dock)
+            self._chat_dock.deleteLater()
+            self._chat_dock = None
 
         if self._settings_dock:
             self.iface.removeDockWidget(self._settings_dock)
@@ -220,6 +241,57 @@ class NASAEarthdata:
     def _on_earthdata_visibility_changed(self, visible):
         """Handle NASA Earthdata dock visibility change."""
         self.earthdata_action.setChecked(visible)
+
+    def toggle_chat_dock(self):
+        """Toggle the NASA Earthdata AI assistant dock widget."""
+        if self._assistant_dependencies_missing():
+            self._open_settings_deps_tab()
+            self.chat_action.setChecked(False)
+            try:
+                self.iface.messageBar().pushWarning(
+                    "NASA Earthdata",
+                    "Install missing GeoAgent dependencies before opening the AI Assistant.",
+                )
+            except Exception:
+                pass  # nosec B110 - message bar failure should not block UI
+            return
+
+        if self._chat_dock is None:
+            try:
+                from .dialogs.chat_dock import ChatDockWidget
+
+                self._chat_dock = ChatDockWidget(
+                    self.iface, self, self.iface.mainWindow()
+                )
+                self._chat_dock.setObjectName("NASAEarthdataChatDock")
+                self._chat_dock.visibilityChanged.connect(
+                    self._on_chat_visibility_changed
+                )
+                self.iface.addDockWidget(
+                    Qt.DockWidgetArea.RightDockWidgetArea, self._chat_dock
+                )
+                self._chat_dock.show()
+                self._chat_dock.raise_()
+                return
+
+            except Exception as e:
+                QMessageBox.critical(
+                    self.iface.mainWindow(),
+                    "Error",
+                    f"Failed to create NASA Earthdata AI Assistant:\n{str(e)}",
+                )
+                self.chat_action.setChecked(False)
+                return
+
+        if self._chat_dock.isVisible():
+            self._chat_dock.hide()
+        else:
+            self._chat_dock.show()
+            self._chat_dock.raise_()
+
+    def _on_chat_visibility_changed(self, visible):
+        """Handle NASA Earthdata AI assistant dock visibility change."""
+        self.chat_action.setChecked(visible)
 
     def toggle_settings_dock(self):
         """Toggle the Settings dock widget visibility."""
@@ -301,6 +373,15 @@ class NASAEarthdata:
         except Exception:
             # Don't let dependency check errors prevent the dock from opening
             pass  # nosec B110 - dependency check is best-effort UX hint
+
+    def _assistant_dependencies_missing(self):
+        """Return True when GeoAgent assistant dependencies are unavailable."""
+        try:
+            from .core.venv_manager import assistant_dependencies_met
+
+            return not assistant_dependencies_met()
+        except Exception:
+            return True
 
     def _open_settings_deps_tab(self):
         """Open the Settings dock and switch to the Dependencies tab."""
