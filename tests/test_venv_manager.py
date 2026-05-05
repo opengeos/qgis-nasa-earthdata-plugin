@@ -2,6 +2,7 @@
 
 import builtins
 import sys
+import types
 
 import pytest
 
@@ -87,3 +88,62 @@ def test_check_dependencies_returns_three_tuple(monkeypatch):
     assert ("geopandas", "") in missing
     assert ("earthaccess", "0.14.0") in installed
     assert ("pandas", "2.2.0") in installed
+
+
+def test_python_executable_name_rejects_helper_binaries():
+    """Only interpreter-like names should be probed."""
+    assert venv_manager._is_python_executable_name("/tmp/python3")
+    assert venv_manager._is_python_executable_name("/tmp/python3.11")
+    assert venv_manager._is_python_executable_name("/tmp/python311")
+    assert not venv_manager._is_python_executable_name("/tmp/python3-config")
+
+
+def test_find_python_executable_selects_matching_bundle_python(monkeypatch, tmp_path):
+    """macOS QGIS launchers should be skipped in favor of bundled Python."""
+    contents = tmp_path / "QGIS.app" / "Contents"
+    macos = contents / "MacOS"
+    macos.mkdir(parents=True)
+    launcher = macos / "QGIS"
+    python_path = macos / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    launcher.write_text("", encoding="utf-8")
+    python_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(venv_manager.sys, "executable", str(launcher))
+    monkeypatch.setattr(venv_manager.sys, "prefix", str(contents))
+    monkeypatch.setattr(venv_manager.sys, "base_prefix", str(contents))
+    monkeypatch.setattr(venv_manager.sys, "exec_prefix", str(contents))
+    monkeypatch.setattr(
+        venv_manager.sys, "_base_executable", str(launcher), raising=False
+    )
+    monkeypatch.setattr(venv_manager.sys, "_base_prefix", str(contents), raising=False)
+
+    def fake_run(cmd, **_kwargs):
+        return types.SimpleNamespace(
+            returncode=0, stdout=f"{sys.version_info.major}.{sys.version_info.minor}\n"
+        )
+
+    monkeypatch.setattr(venv_manager.subprocess, "run", fake_run)
+
+    assert venv_manager._find_python_executable() == str(python_path)
+
+
+def test_find_python_executable_reports_checked_candidates(monkeypatch, tmp_path):
+    """Resolver failures should be explicit and diagnosable."""
+    launcher = tmp_path / "QGIS"
+    launcher.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(venv_manager.sys, "executable", str(launcher))
+    monkeypatch.setattr(venv_manager.sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(venv_manager.sys, "base_prefix", str(tmp_path))
+    monkeypatch.setattr(venv_manager.sys, "exec_prefix", str(tmp_path))
+    monkeypatch.setattr(
+        venv_manager.sys, "_base_executable", str(launcher), raising=False
+    )
+    monkeypatch.setattr(venv_manager.sys, "_base_prefix", str(tmp_path), raising=False)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        venv_manager._find_python_executable()
+
+    message = str(exc_info.value)
+    assert "Could not find a Python executable" in message
+    assert "Checked candidates" in message
