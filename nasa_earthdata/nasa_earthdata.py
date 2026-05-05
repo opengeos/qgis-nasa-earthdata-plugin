@@ -176,7 +176,7 @@ class NASAEarthdata:
                 try:
                     shutdown()
                 except Exception:
-                    pass  # nosec B110 - best-effort worker shutdown on unload
+                    pass  # nosec B110
             self.iface.removeDockWidget(self._chat_dock)
             self._chat_dock.deleteLater()
             self._chat_dock = None
@@ -253,7 +253,7 @@ class NASAEarthdata:
                     "Install missing GeoAgent dependencies before opening the AI Assistant.",
                 )
             except Exception:
-                pass  # nosec B110 - message bar failure should not block UI
+                pass  # nosec B110
             return
 
         if self._chat_dock is None:
@@ -372,7 +372,7 @@ class NASAEarthdata:
 
         except Exception:
             # Don't let dependency check errors prevent the dock from opening
-            pass  # nosec B110 - dependency check is best-effort UX hint
+            pass  # nosec B110
 
     def _assistant_dependencies_missing(self):
         """Return True when GeoAgent assistant dependencies are unavailable."""

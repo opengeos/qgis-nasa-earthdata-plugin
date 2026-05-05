@@ -11,7 +11,7 @@ import importlib.metadata
 import os
 import platform
 import shutil
-import subprocess  # nosec B404 - only invoked with hard-coded internal commands
+import subprocess  # nosec B404
 import sys
 import time
 from typing import Tuple, Optional, Callable, List
@@ -447,7 +447,7 @@ def create_venv(venv_dir=None, progress_callback=None):
         env = _get_clean_env_for_venv()
         kwargs = _get_subprocess_kwargs()
 
-        result = subprocess.run(  # nosec B603 - internal command list, shell=False
+        result = subprocess.run(  # nosec B603
             cmd,
             capture_output=True,
             text=True,
@@ -472,7 +472,7 @@ def create_venv(venv_dir=None, progress_callback=None):
                         "--upgrade",
                     ]
                     try:
-                        ensurepip_result = subprocess.run(  # nosec B603 - internal command list, shell=False
+                        ensurepip_result = subprocess.run(  # nosec B603
                             ensurepip_cmd,
                             capture_output=True,
                             text=True,
@@ -684,7 +684,7 @@ def _run_install_subprocess(
         A tuple of (returncode: int, stdout: str, stderr: str).
             returncode is -1 if cancelled, -2 if timed out.
     """
-    proc = subprocess.Popen(  # nosec B603 - internal command list, shell=False
+    proc = subprocess.Popen(  # nosec B603
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -927,7 +927,7 @@ def verify_venv(venv_dir=None, progress_callback=None):
         cmd = [python_path, "-c", verify_code]
 
         try:
-            result = subprocess.run(  # nosec B603 - internal command list, shell=False
+            result = subprocess.run(  # nosec B603
                 cmd,
                 capture_output=True,
                 text=True,
@@ -1002,7 +1002,7 @@ def _ensure_proj_data():
             _set_proj_data(proj_dir)
             return
     except Exception:
-        pass  # nosec B110 - fall through to next PROJ-data lookup strategy
+        pass  # nosec B110
 
     # Strategy 2: sys.prefix/share/proj (conda / pixi / OSGeo4W)
     candidate = os.path.join(sys.prefix, "share", "proj")
@@ -1021,7 +1021,7 @@ def _ensure_proj_data():
                     _set_proj_data(candidate)
                     return
     except Exception:
-        pass  # nosec B110 - fall through to next PROJ-data lookup strategy
+        pass  # nosec B110
 
     # Strategy 4: Search common system locations
     for candidate in (

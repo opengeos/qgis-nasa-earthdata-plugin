@@ -11,7 +11,7 @@ Source: https://github.com/astral-sh/python-build-standalone
 import os
 import sys
 import platform
-import subprocess  # nosec B404 - only invoked with hard-coded internal commands
+import subprocess  # nosec B404
 import tarfile
 import zipfile
 import tempfile
@@ -322,7 +322,7 @@ def verify_standalone_python():
             startupinfo.wShowWindow = subprocess.SW_HIDE
             kwargs["startupinfo"] = startupinfo
 
-        result = subprocess.run(  # nosec B603 - internal command list, shell=False
+        result = subprocess.run(  # nosec B603
             [python_path, "-c", "import sys; print(sys.version)"],
             capture_output=True,
             text=True,

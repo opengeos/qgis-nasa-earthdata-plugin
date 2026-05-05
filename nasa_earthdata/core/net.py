@@ -49,7 +49,7 @@ def https_only_urlopen(url: str, timeout: float = 30):
     """
     require_https(url)
     opener = _build_opener()
-    return opener.open(url, timeout=timeout)  # nosec B310 - https enforced
+    return opener.open(url, timeout=timeout)  # nosec B310
 
 
 def https_only_urlretrieve(
@@ -74,7 +74,7 @@ def https_only_urlretrieve(
     """
     require_https(url)
     opener = _build_opener()
-    with opener.open(url, timeout=timeout) as resp:  # nosec B310 - https enforced
+    with opener.open(url, timeout=timeout) as resp:  # nosec B310
         total_size = int(resp.headers.get("Content-Length") or 0)
         block_num = 0
         with open(filename, "wb") as out:

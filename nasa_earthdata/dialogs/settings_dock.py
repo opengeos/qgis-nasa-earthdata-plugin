@@ -649,7 +649,7 @@ class SettingsDockWidget(QDockWidget):
                 with open(netrc_path, "r") as f:
                     existing_content = f.read()
             except Exception:
-                pass  # nosec B110 - unreadable .netrc treated as empty content
+                pass  # nosec B110
 
         # Parse existing entries, excluding any existing earthdata entry
         lines = existing_content.strip().split("\n") if existing_content.strip() else []
@@ -783,7 +783,7 @@ class SettingsDockWidget(QDockWidget):
         """Load settings from QSettings."""
         # Credentials precedence: .netrc -> environment -> QSettings username
         username = ""
-        password = ""  # nosec B105 - empty fallback, real value loaded below
+        password = ""  # nosec B105
         source = None
 
         netrc_username, netrc_password = self._get_netrc_earthdata_credentials()

@@ -11,7 +11,7 @@ import os
 import sys
 import platform
 import stat
-import subprocess  # nosec B404 - only invoked with hard-coded internal commands
+import subprocess  # nosec B404
 import tarfile
 import zipfile
 import tempfile
@@ -265,7 +265,7 @@ def verify_uv():
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
-        result = subprocess.run(  # nosec B603 - internal command list, shell=False
+        result = subprocess.run(  # nosec B603
             [uv_path, "--version"],
             capture_output=True,
             text=True,
