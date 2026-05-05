@@ -3,7 +3,7 @@ name=NASA Earthdata
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 description=Search, visualize, and download NASA Earthdata products in QGIS. Supports COG visualization and data footprint display.
-version=0.7.0
+version=0.7.1
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -37,6 +37,8 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.7.1
+        - Fixed dependency installer Python detection for macOS QGIS app bundles
     0.7.0
         - Compatible with QGIS 4.0 (Qt6) while remaining compatible with QGIS 3.28+ (Qt5)
         - Added PyQt6 import smoke tests and Bandit security scan in CI
@@ -65,5 +67,4 @@ changelog=
         - Data download capability
         - Settings panel for credentials
         - Update checker
-
 
