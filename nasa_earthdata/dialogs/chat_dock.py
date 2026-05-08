@@ -54,30 +54,25 @@ def _setting(settings, key, default="", value_type=str):
     return settings.value(f"{SETTINGS_PREFIX}{key}", default, type=value_type)
 
 
-def _provider_setting_name(provider):
-    return f"{provider}_api_{'key'}"
-
-
-def _provider_env_name(provider):
-    return f"{provider}_API_{'KEY'}"
-
-
 def _apply_environment_from_settings(settings):
     """Apply provider credentials from QSettings to the current QGIS process."""
-    auth_setting_name = "pass" + "word"
+    # Each entry maps a QSettings key to one or more environment variable names.
+    # The keys/values contain substrings ("api_key", "password") that the
+    # detect-secrets KeywordDetector flags. They are placeholder names, not
+    # secrets, so the inline pragma opts those lines out of that detector.
     env_map = {
-        _provider_setting_name("openai"): _provider_env_name("OPENAI"),
-        _provider_setting_name("anthropic"): _provider_env_name("ANTHROPIC"),
-        _provider_setting_name("gemini"): (
-            _provider_env_name("GEMINI"),
-            _provider_env_name("GOOGLE"),
+        "openai_api_key": "OPENAI_API_KEY",  # pragma: allowlist secret
+        "anthropic_api_key": "ANTHROPIC_API_KEY",  # pragma: allowlist secret
+        "gemini_api_key": (  # pragma: allowlist secret
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
         ),
         "aws_region": "AWS_REGION",
         "ollama_host": "OLLAMA_HOST",
-        _provider_setting_name("litellm"): _provider_env_name("LITELLM"),
+        "litellm_api_key": "LITELLM_API_KEY",  # pragma: allowlist secret
         "litellm_base_url": "LITELLM_BASE_URL",
         "username": "EARTHDATA_USERNAME",
-        auth_setting_name: "EARTHDATA_" + "PASS" + "WORD",
+        "password": "EARTHDATA_PASSWORD",  # nosec B105 # pragma: allowlist secret
     }
     for key, env_names in env_map.items():
         value = _setting(settings, key, "").strip()
