@@ -36,7 +36,9 @@ icon=icons/icon.svg
 experimental=False
 deprecated=False
 
-changelog=Fix macOS QGIS installer dependency installation and bump patch version.
+changelog=
+    0.7.2
+        - Fix macOS QGIS installer dependency installation
     0.7.1
         - Fixed dependency installer Python detection for macOS QGIS app bundles
     0.7.0
