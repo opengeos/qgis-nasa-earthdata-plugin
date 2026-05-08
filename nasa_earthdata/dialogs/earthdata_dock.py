@@ -375,7 +375,7 @@ class COGDisplayWorker(QThread):
                     self.progress.emit(f"Authenticated via {strategy}")
                     return True
             except Exception:
-                continue  # nosec B112 - try the next auth strategy
+                continue  # nosec B112
 
         # Try credentials from Settings input boxes
         if self.username and self.password:
@@ -387,7 +387,7 @@ class COGDisplayWorker(QThread):
                     self.progress.emit("Authenticated via settings input")
                     return True
             except Exception:
-                pass  # nosec B110 - auth failure handled by returning False below
+                pass  # nosec B110
 
         return False
 
@@ -1383,13 +1383,13 @@ class EarthdataDockWidget(QDockWidget):
                 # Remove layer from project
                 QgsProject.instance().removeMapLayer(self._footprints_layer.id())
             except Exception:
-                pass  # nosec B110 - layer cleanup is best-effort
+                pass  # nosec B110
 
             # Delete the layer object to release file handles (important on Windows)
             try:
                 del self._footprints_layer
             except Exception:
-                pass  # nosec B110 - layer cleanup is best-effort
+                pass  # nosec B110
             self._footprints_layer = None
 
             # Force garbage collection to ensure file handles are released on Windows
@@ -1640,7 +1640,7 @@ class EarthdataDockWidget(QDockWidget):
             Tuple of (username, password) strings. Empty strings if unavailable.
         """
         username = ""
-        password = ""  # nosec B105 - empty fallback when settings dock unavailable
+        password = ""  # nosec B105
         try:
             settings_dock = self.iface.mainWindow().findChild(
                 QDockWidget, "NASAEarthdataSettingsDock"
@@ -1651,7 +1651,7 @@ class EarthdataDockWidget(QDockWidget):
                 if hasattr(settings_dock, "password_input"):
                     password = settings_dock.password_input.text().strip()
         except Exception:
-            pass  # nosec B110 - empty creds returned when settings dock unavailable
+            pass  # nosec B110
         return username, password
 
     def _on_cog_finished(self, results, cookie_file=None):

@@ -56,16 +56,23 @@ def _setting(settings, key, default="", value_type=str):
 
 def _apply_environment_from_settings(settings):
     """Apply provider credentials from QSettings to the current QGIS process."""
+    # Each entry maps a QSettings key to one or more environment variable names.
+    # The keys/values contain substrings ("api_key", "password") that the
+    # detect-secrets KeywordDetector flags. They are placeholder names, not
+    # secrets, so the inline pragma opts those lines out of that detector.
     env_map = {
-        "openai_api_key": "OPENAI_API_KEY",
-        "anthropic_api_key": "ANTHROPIC_API_KEY",
-        "gemini_api_key": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+        "openai_api_key": "OPENAI_API_KEY",  # pragma: allowlist secret
+        "anthropic_api_key": "ANTHROPIC_API_KEY",  # pragma: allowlist secret
+        "gemini_api_key": (  # pragma: allowlist secret
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+        ),
         "aws_region": "AWS_REGION",
         "ollama_host": "OLLAMA_HOST",
-        "litellm_api_key": "LITELLM_API_KEY",
+        "litellm_api_key": "LITELLM_API_KEY",  # pragma: allowlist secret
         "litellm_base_url": "LITELLM_BASE_URL",
         "username": "EARTHDATA_USERNAME",
-        "password": "EARTHDATA_PASSWORD",  # nosec B105 - env var name, not a password
+        "password": "EARTHDATA_PASSWORD",  # nosec B105 # pragma: allowlist secret
     }
     for key, env_names in env_map.items():
         value = _setting(settings, key, "").strip()
@@ -682,8 +689,8 @@ class ChatDockWidget(QDockWidget):
         """Stop the animated status timer when the dock is dismissed."""
         try:
             self._stop_running_status()
-        except Exception:
-            pass  # nosec B110 - best-effort cleanup on dock dismissal
+        except Exception:  # nosec B110
+            pass
 
     def shutdown(self):
         """Stop the status timer and wait for any in-flight chat worker.
@@ -700,12 +707,12 @@ class ChatDockWidget(QDockWidget):
         try:
             worker.finished.disconnect(self._on_worker_finished)
         except (TypeError, RuntimeError):
-            pass  # nosec B110 - signal may already be disconnected
+            pass
         try:
             if worker.isRunning():
                 worker.wait(5000)
         except RuntimeError:
-            pass  # nosec B110 - worker C++ object already deleted
+            pass
         self._worker = None
 
     def hideEvent(self, event):
