@@ -3,7 +3,7 @@ name=NASA Earthdata
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 description=Search, visualize, and download NASA Earthdata products in QGIS. Supports COG visualization and data footprint display.
-version=0.7.2
+version=0.7.3
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -37,6 +37,9 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.7.3
+        - Remove bundled AI assistant panel
+        - Route the AI Assistant button to OpenGeoAgent
     0.7.2
         - Fix macOS QGIS installer dependency installation
     0.7.1
@@ -69,4 +72,3 @@ changelog=
         - Data download capability
         - Settings panel for credentials
         - Update checker
-

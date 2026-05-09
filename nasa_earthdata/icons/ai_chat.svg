@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- Chat bubble -->
+  <path d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h4l4 4 4-4h4c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z" fill="#1976D2" stroke="none"/>
+  <!-- AI sparkle star -->
+  <path d="M12 6l1.2 2.4L16 9.6l-2.4 1.2L12 14l-1.2-3.2L8 9.6l2.8-1.2z" fill="#FFFFFF" stroke="none"/>
+  <!-- Small sparkles -->
+  <circle cx="17" cy="6" r="0.8" fill="#FFC107"/>
+  <circle cx="7" cy="13" r="0.6" fill="#FFC107"/>
+</svg>
