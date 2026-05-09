@@ -2,8 +2,8 @@
 
 A QGIS plugin for searching, visualizing, and downloading NASA Earthdata products. This plugin provides access to NASA's Earth science data catalog directly within QGIS, supporting Cloud Optimized GeoTIFF (COG) visualization and data footprint display.
 
+[![QGIS Plugin](https://img.shields.io/badge/QGIS-Plugin-green.svg)](https://plugins.qgis.org/plugins/nasa_earthdata/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![QGIS](https://img.shields.io/badge/QGIS-3.28+-green.svg)](https://qgis.org)
 
 ## Features
 
@@ -28,7 +28,7 @@ A QGIS plugin for searching, visualizing, and downloading NASA Earthdata product
 
 ## Video Tutorials
 
- 👉 [The Easiest Way to Access 120 Petabytes of NASA Data Inside QGIS](https://youtu.be/H78l-3nbPfk)
+👉 [The Easiest Way to Access 120 Petabytes of NASA Data Inside QGIS](https://youtu.be/H78l-3nbPfk)
 
 [![NASA Earthdata QGIS Plugin Tutorial](https://github.com/user-attachments/assets/af264307-f747-4763-87fc-2598d53e25bb)](https://youtu.be/H78l-3nbPfk)
 
@@ -143,6 +143,7 @@ Before using the plugin, you need to configure your NASA Earthdata credentials:
 4. Click **Save Settings**
 
 Alternatively, you can configure credentials via:
+
 - Environment variables: `EARTHDATA_USERNAME` and `EARTHDATA_PASSWORD`
 - `.netrc` file with entry for `urs.earthdata.nasa.gov`
 
