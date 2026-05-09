@@ -10,7 +10,10 @@ A QGIS plugin for searching, visualizing, and downloading NASA Earthdata product
 - **Search NASA Earthdata Catalog**: Browse and search thousands of NASA Earth science datasets using keywords, bounding boxes, and temporal filters
 - **Visualize Data Footprints**: Display search result footprints directly on the QGIS map canvas
 - **Cloud Optimized GeoTIFF (COG) Support**: Stream and visualize COG files directly without downloading
-- **Data Download**: Download granules for local processing and visualization
+- **Saved and Recent Searches**: Save reusable search presets, reload recent searches, and delete searches you no longer need
+- **Granule Details and Export**: Inspect selected granule metadata and export search results to CSV or GeoJSON
+- **Download Queue**: Download selected granules with queue status, cancel/retry controls, skip-existing behavior, and manifest output
+- **QGIS Processing Tools**: Run NASA Earthdata search, download, footprint, and RGB COG workflows from the Processing Toolbox and Model Designer
 - **Earthdata Login Integration**: Seamless authentication with NASA Earthdata Login credentials
 - **Settings Panel**: Configure credentials, download preferences, and plugin options
 
@@ -142,26 +145,58 @@ Alternatively, you can configure credentials via:
 
 1. Click the **NASA Earthdata Search** button in the toolbar
 2. Filter datasets by keyword (optional)
-3. Select a dataset from the dropdown
+3. Select a dataset from the dropdown. By default, the plugin selects `HLSL30` with concept ID `C2021957657-LPCLOUD` when it is available.
 4. Set the bounding box (or use current map extent)
 5. Set the date range
 6. Click **Search**
 
    ![](https://github.com/user-attachments/assets/5f41e258-662f-4441-84e5-d752971de573)
 
+The search panel is organized into collapsible sections. **Granule Details** and **Download Queue** are collapsed by default; expand them when you need metadata inspection or download status.
+
+### Saved and Recent Searches
+
+- Click **Save** in the **Preset** row to store the current dataset, bounding box, date range, max items, and advanced search options.
+- Select a saved preset and click **Load** to restore it.
+- Click **Delete** to remove the selected saved preset.
+- Recent searches are recorded automatically after each search. Select a recent item and click **Load** to restore it, or **Delete** to remove it from the recent list.
+
+Saved presets are stored in `~/.qgis_nasa_earthdata/workflows/search_presets.json` by default.
+
 ### Visualizing Data
 
 - **Footprints**: Search results are automatically displayed as footprints on the map
 - **COG Layers**: Select results and click **Display COG** to stream Cloud Optimized GeoTIFFs
+- **RGB Composite**: Select RGB mode and choose red, green, and blue COG channels to create a streamed RGB VRT layer
 - **Downloaded Data**: After downloading, you can add raster files directly to the map
+
+### Inspecting and Exporting Results
+
+- Select a result row and expand **Granule Details** to view native ID, dataset identity, provider, temporal range, size, COG availability, and data links.
+- Click **Export CSV** to write result metadata to `earthdata_results.csv`.
+- Click **Export GeoJSON** to write result metadata and footprints to `earthdata_results.geojson` and add the exported layer to the QGIS project.
 
 ### Downloading Data
 
 1. Select the granules you want to download from the results table
 2. Click **Download**
 3. Choose a destination folder
-4. Wait for the download to complete
-5. Optionally add downloaded files to the map
+4. Expand **Download Queue** to monitor per-granule status
+5. Optionally cancel the queue or retry failed items
+6. Optionally add downloaded files to the map
+
+The downloader skips files that already exist in the destination folder when their filenames match Earthdata link basenames. Each download run writes a CSV manifest in the selected output folder.
+
+### QGIS Processing
+
+The plugin registers a **NASA Earthdata** Processing provider with these algorithms:
+
+- **Search NASA Earthdata**: Search by short name or concept ID and optionally write result footprints to GeoJSON
+- **Download NASA Earthdata Granules**: Download granules from an exported Earthdata JSON input
+- **Add Earthdata Footprints**: Copy/export an Earthdata results GeoJSON as a Processing output
+- **Create RGB COG Layer**: Build an RGB VRT from red, green, and blue COG URLs or paths
+
+These tools can be run from **Processing** → **Toolbox** and used in QGIS Model Designer.
 
 ## Supported Datasets
 
@@ -187,11 +222,18 @@ qgis-nasa-earthdata-plugin/
 │   ├── nasa_earthdata.py    # Main plugin class
 │   ├── metadata.txt         # Plugin metadata
 │   ├── LICENSE
+│   ├── core/                # Network, environment, and workflow helpers
+│   │   ├── net.py
+│   │   ├── workflows.py
+│   │   └── venv_manager.py
 │   ├── dialogs/             # UI components
 │   │   ├── __init__.py
 │   │   ├── earthdata_dock.py    # Main search panel
 │   │   ├── settings_dock.py     # Settings panel
 │   │   └── update_checker.py    # Update checker dialog
+│   ├── processing/          # QGIS Processing provider and algorithms
+│   │   ├── provider.py
+│   │   └── algorithms.py
 │   └── icons/               # Plugin icons
 │       ├── icon.svg
 │       ├── settings.svg

@@ -55,10 +55,10 @@ class _BaseAlgorithm(QgsProcessingAlgorithm):
         return QCoreApplication.translate("NASAEarthdataProcessing", string)
 
     def group(self):
-        return self.tr("NASA Earthdata")
+        return self.tr("Tools")
 
     def groupId(self):
-        return "nasa_earthdata"
+        return "tools"
 
     def shortHelpString(self):
         return self.tr("Runs a NASA Earthdata workflow from QGIS Processing.")
