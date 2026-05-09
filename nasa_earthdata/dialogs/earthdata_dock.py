@@ -2945,7 +2945,11 @@ class EarthdataDockWidget(QDockWidget):
         if not selected_indices:
             selected_indices = list(range(min(24, len(self._search_results))))
 
-        html_parts = ["<html><body><h3>NASA Earthdata Quicklook Gallery</h3>"]
+        html_parts = [
+            "<html><body>",
+            "<h3>NASA Earthdata Quicklook Gallery</h3>",
+            '<table width="100%" cellspacing="0" cellpadding="8">',
+        ]
         for result_index in selected_indices[:48]:
             if result_index < 0 or result_index >= len(self._search_results):
                 continue
@@ -2954,17 +2958,25 @@ class EarthdataDockWidget(QDockWidget):
             quicklooks = granule_quicklook_links(granule)
             if not quicklooks:
                 continue
-            html_parts.append(
-                '<div style="margin-bottom:14px;">'
-                f"<h4>{html.escape(str(native_id))}</h4>"
-            )
+            image_parts = []
             for url in quicklooks[:6]:
                 image_html = self._quicklook_img_html(url, 180)
                 if image_html:
-                    html_parts.append(image_html)
-            html_parts.append(self._link_list_html(quicklooks, ""))
-            html_parts.append("</div>")
-        html_parts.append("</body></html>")
+                    image_parts.append(image_html)
+            if not image_parts:
+                continue
+            html_parts.append(
+                "<tr>"
+                '<td width="220" valign="top">'
+                f"{''.join(image_parts)}"
+                "</td>"
+                '<td valign="top">'
+                f"<b>{html.escape(str(native_id))}</b>"
+                f"{self._link_list_html(quicklooks, '')}"
+                "</td>"
+                "</tr>"
+            )
+        html_parts.append("</table></body></html>")
         return "".join(html_parts)
 
     def _open_quicklook_gallery(self):
