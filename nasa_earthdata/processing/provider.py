@@ -12,6 +12,7 @@ if not isinstance(QgsProcessingProvider, type):
 
 from .algorithms import (
     AddFootprintsAlgorithm,
+    CreateNormalizedDifferenceVrtAlgorithm,
     CreateRgbCogLayerAlgorithm,
     DownloadGranulesAlgorithm,
     SearchEarthdataAlgorithm,
@@ -43,6 +44,7 @@ class NASAEarthdataProcessingProvider(QgsProcessingProvider):
             DownloadGranulesAlgorithm(),
             AddFootprintsAlgorithm(),
             CreateRgbCogLayerAlgorithm(),
+            CreateNormalizedDifferenceVrtAlgorithm(),
         ):
             if hasattr(self, "addAlgorithm"):
                 self.addAlgorithm(algorithm)

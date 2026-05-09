@@ -35,6 +35,10 @@ class NASAEarthdata:
         self._settings_dock = None
         self._deps_signal_connected = False
         self._processing_provider = None
+        try:
+            setattr(self.iface, "_nasa_earthdata_plugin", self)
+        except Exception:
+            pass  # nosec B110
 
     def add_action(
         self,
@@ -197,6 +201,11 @@ class NASAEarthdata:
         # Remove menu
         if self.menu:
             self.menu.deleteLater()
+        try:
+            if getattr(self.iface, "_nasa_earthdata_plugin", None) is self:
+                delattr(self.iface, "_nasa_earthdata_plugin")
+        except Exception:
+            pass  # nosec B110
 
     def _register_processing_provider(self):
         """Register QGIS Processing provider when Processing is available."""
@@ -280,7 +289,7 @@ class NASAEarthdata:
         """Handle NASA Earthdata dock visibility change."""
         self.earthdata_action.setChecked(visible)
 
-    def open_ai_assistant(self):
+    def open_ai_assistant(self, context=None):
         """Open the OpenGeoAgent chat panel, or prompt for plugin installation."""
         plugin = self._get_open_geoagent_plugin()
         if plugin is None:
@@ -302,15 +311,57 @@ class NASAEarthdata:
             if chat_dock is not None and chat_dock.isVisible():
                 chat_dock.show()
                 chat_dock.raise_()
+                self._deliver_ai_context(plugin, context)
                 return
 
             plugin.toggle_chat_dock()
+            self._deliver_ai_context(plugin, context)
         except Exception as exc:
             QMessageBox.critical(
                 self.iface.mainWindow(),
                 "OpenGeoAgent",
                 f"Failed to open the OpenGeoAgent chat panel:\n{exc}",
             )
+
+    def _deliver_ai_context(self, plugin, context=None):
+        """Best-effort handoff of NASA Earthdata state to OpenGeoAgent."""
+        if not context:
+            context = self._current_earthdata_context()
+        if not context:
+            return
+
+        targets = [plugin, getattr(plugin, "_chat_dock", None)]
+        method_names = (
+            "set_external_context",
+            "set_context",
+            "append_context",
+            "receive_context",
+        )
+        for target in targets:
+            if target is None:
+                continue
+            for method_name in method_names:
+                method = getattr(target, method_name, None)
+                if callable(method):
+                    try:
+                        method("NASA Earthdata", context)
+                    except TypeError:
+                        method(context)
+                    return
+            try:
+                setattr(target, "_nasa_earthdata_context", context)
+            except Exception:
+                pass  # nosec B110
+
+    def _current_earthdata_context(self):
+        """Return current dock context for the AI assistant, when available."""
+        dock = self._earthdata_dock
+        if dock is not None and hasattr(dock, "ai_context_summary"):
+            try:
+                return dock.ai_context_summary()
+            except Exception:
+                return ""
+        return ""
 
     def _get_open_geoagent_plugin(self):
         """Return the loaded OpenGeoAgent plugin instance, loading it if possible."""

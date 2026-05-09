@@ -3,10 +3,12 @@
 import csv
 import json
 import os
+from urllib.parse import quote
 from datetime import datetime, timezone
 from pathlib import Path
 
 PRESET_SCHEMA_VERSION = 1
+CMR_COLLECTIONS_URL = "https://cmr.earthdata.nasa.gov/search/collections.json"
 RESULT_EXPORT_FIELDS = [
     "result_idx",
     "native_id",
@@ -29,6 +31,22 @@ RESULT_EXPORT_FIELDS = [
 ]
 
 
+def _jsonable(value):
+    """Convert common Earthdata/QGIS-adjacent objects to JSON-safe values."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    if hasattr(value, "items"):
+        try:
+            return _jsonable(dict(value.items()))
+        except Exception:
+            pass  # nosec B110
+    return str(value)
+
+
 def utc_timestamp():
     """Return an ISO-8601 UTC timestamp with a trailing Z."""
     return (
@@ -46,6 +64,49 @@ def workflow_dir(settings=None):
     return Path.home() / ".qgis_nasa_earthdata" / "workflows"
 
 
+def cmr_collection_url(dataset_item):
+    """Return a CMR collection metadata URL for a catalog dataset item."""
+    dataset_item = dataset_item or {}
+    concept_id = (dataset_item.get("concept_id") or "").strip()
+    short_name = (dataset_item.get("short_name") or "").strip()
+    if concept_id:
+        return f"{CMR_COLLECTIONS_URL}?concept_id={quote(concept_id)}"
+    if short_name:
+        return f"{CMR_COLLECTIONS_URL}?short_name={quote(short_name)}"
+    return ""
+
+
+def cmr_collection_summary(payload):
+    """Extract compact collection details from a CMR collections response."""
+    entries = payload.get("feed", {}).get("entry", []) if isinstance(payload, dict) else []
+    if not entries:
+        return {}
+    entry = entries[0]
+    polygons = entry.get("polygons") or []
+    boxes = entry.get("boxes") or []
+    links = [
+        item.get("href")
+        for item in entry.get("links", [])
+        if isinstance(item, dict) and item.get("href")
+    ]
+    return {
+        "concept_id": entry.get("id", ""),
+        "short_name": entry.get("short_name", ""),
+        "version_id": entry.get("version_id", ""),
+        "title": entry.get("title", ""),
+        "summary": entry.get("summary", ""),
+        "provider": entry.get("data_center", ""),
+        "time_start": entry.get("time_start", ""),
+        "time_end": entry.get("time_end", ""),
+        "updated": entry.get("updated", ""),
+        "doi": entry.get("doi", ""),
+        "cloud_hosted": bool(entry.get("cloud_hosted")),
+        "archive_center": entry.get("archive_center", ""),
+        "spatial_extent": polygons[:3] or boxes[:3],
+        "links": links[:8],
+    }
+
+
 def presets_path(settings=None):
     """Return the JSON file path used for saved search presets."""
     return workflow_dir(settings) / "search_presets.json"
@@ -54,6 +115,11 @@ def presets_path(settings=None):
 def manifests_dir(settings=None):
     """Return the directory used for download manifests."""
     return workflow_dir(settings) / "manifests"
+
+
+def download_queue_state_path(settings=None):
+    """Return the path used for the latest persistent download queue snapshot."""
+    return workflow_dir(settings) / "download_queue_latest.json"
 
 
 def load_search_presets(path):
@@ -281,6 +347,52 @@ def granule_links(granule):
     return list(dict.fromkeys(links))
 
 
+def granule_related_urls(granule):
+    """Return UMM RelatedUrls entries as dictionaries."""
+    related_urls = granule_get(granule, "umm", "RelatedUrls", default=[])
+    if not isinstance(related_urls, list):
+        return []
+    return [item for item in related_urls if isinstance(item, dict)]
+
+
+def granule_quicklook_links(granule):
+    """Return likely browse/quicklook image URLs for a granule."""
+    links = []
+    for item in granule_related_urls(granule):
+        url = str(item.get("URL", "")).strip()
+        if not url:
+            continue
+        url_lower = url.lower()
+        type_text = " ".join(
+            str(item.get(key, ""))
+            for key in ("Type", "Subtype", "Description", "Format")
+        ).lower()
+        if (
+            "browse" in type_text
+            or "quicklook" in type_text
+            or "thumbnail" in type_text
+            or any(url_lower.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif"))
+        ):
+            links.append(url)
+    return list(dict.fromkeys(links))
+
+
+def granule_citation_links(granule):
+    """Return likely DOI/citation/documentation URLs for a granule."""
+    links = []
+    for item in granule_related_urls(granule):
+        url = str(item.get("URL", "")).strip()
+        if not url:
+            continue
+        text = " ".join(
+            str(item.get(key, ""))
+            for key in ("Type", "Subtype", "Description", "Format")
+        ).lower()
+        if "doi" in url.lower() or "citation" in text or "documentation" in text:
+            links.append(url)
+    return list(dict.fromkeys(links))
+
+
 def cog_links_from_links(links):
     """Return HTTPS TIFF/COG-looking links."""
     return [
@@ -289,6 +401,19 @@ def cog_links_from_links(links):
         if link.lower().startswith("http")
         and any(ext in link.lower() for ext in (".tif", ".tiff"))
     ]
+
+
+def granules_to_raw_jsonable(granules):
+    """Convert earthaccess granules to a stable JSON-serializable list."""
+    return [_jsonable(granule) for granule in (granules or [])]
+
+
+def write_granules_json(path, granules):
+    """Write raw earthaccess/CMR granules to JSON."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(granules_to_raw_jsonable(granules), f, indent=2, sort_keys=True)
 
 
 def granule_export_row(granule, result_idx, dataset_item=None):
@@ -330,6 +455,132 @@ def granules_to_export_rows(granules, dataset_item=None):
         granule_export_row(granule, index, dataset_item)
         for index, granule in enumerate(granules or [])
     ]
+
+
+def _geometry_for_index(gdf, index):
+    if gdf is None:
+        return None
+    try:
+        geom = gdf.geometry.iloc[index]
+        if geom is not None and not geom.is_empty:
+            return geom.__geo_interface__
+    except Exception:
+        return None
+    return None
+
+
+def _bbox_for_geometry(geometry):
+    if not geometry:
+        return None
+
+    coords = []
+
+    def collect(value):
+        if isinstance(value, (list, tuple)):
+            if len(value) >= 2 and all(
+                isinstance(item, (int, float)) for item in value[:2]
+            ):
+                coords.append((float(value[0]), float(value[1])))
+            else:
+                for item in value:
+                    collect(item)
+
+    collect(geometry.get("coordinates"))
+    if not coords:
+        return None
+    xs = [item[0] for item in coords]
+    ys = [item[1] for item in coords]
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def granules_to_stac_item_collection(granules, dataset_item=None, gdf=None):
+    """Convert granules to a lightweight STAC ItemCollection."""
+    dataset_item = dataset_item or {}
+    rows = granules_to_export_rows(granules, dataset_item)
+    features = []
+    for index, row in enumerate(rows):
+        geometry = _geometry_for_index(gdf, index)
+        bbox = _bbox_for_geometry(geometry)
+        links = [link for link in row.get("links", "").splitlines() if link]
+        cog_links = [link for link in row.get("cog_links", "").splitlines() if link]
+        assets = {}
+        for asset_index, link in enumerate(links, start=1):
+            filename = os.path.basename(link.split("?")[0]) or f"asset-{asset_index}"
+            role = "data" if link in cog_links else "metadata"
+            assets[f"asset_{asset_index}"] = {
+                "href": link,
+                "title": filename,
+                "roles": [role],
+            }
+
+        features.append(
+            {
+                "type": "Feature",
+                "stac_version": "1.0.0",
+                "id": row.get("native_id") or f"granule-{index + 1}",
+                "bbox": bbox,
+                "geometry": geometry,
+                "properties": {
+                    "datetime": row.get("temporal_start") or None,
+                    "start_datetime": row.get("temporal_start") or None,
+                    "end_datetime": row.get("temporal_end") or None,
+                    "platform": dataset_item.get("short_name", ""),
+                    "earthdata:concept_id": row.get("collection_concept_id")
+                    or dataset_item.get("concept_id", ""),
+                    "earthdata:provider": row.get("provider")
+                    or dataset_item.get("provider", ""),
+                    "earthdata:granule_ur": row.get("granule_ur", ""),
+                    "eo:cloud_cover": row.get("cloud_cover", ""),
+                },
+                "collection": dataset_item.get("concept_id")
+                or dataset_item.get("short_name", ""),
+                "assets": assets,
+                "links": [
+                    {"rel": "collection", "href": dataset_item.get("concept_id", "")}
+                ]
+                if dataset_item.get("concept_id")
+                else [],
+            }
+        )
+
+    return {
+        "type": "FeatureCollection",
+        "stac_version": "1.0.0",
+        "features": features,
+    }
+
+
+def write_results_stac(path, granules, dataset_item=None, gdf=None):
+    """Write current results as a STAC ItemCollection JSON file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = granules_to_stac_item_collection(granules, dataset_item, gdf)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+
+
+def write_workflow_bundle(
+    path,
+    preset,
+    granules,
+    rows,
+    stac_item_collection=None,
+    manifest=None,
+):
+    """Write a reproducible search/download workflow bundle."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": PRESET_SCHEMA_VERSION,
+        "created_at": utc_timestamp(),
+        "search": preset or {},
+        "results": rows or [],
+        "granules": granules_to_raw_jsonable(granules),
+        "stac": stac_item_collection or {},
+        "download_manifest": manifest or "",
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
 
 
 def write_results_csv(path, rows):
@@ -411,3 +662,28 @@ def write_download_manifest(path, rows):
                     "files": "\n".join(str(item) for item in row.get("files", [])),
                 }
             )
+
+
+def write_download_queue_state(path, rows, manifest="", output_dir=""):
+    """Persist the latest download queue state for restart recovery."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": PRESET_SCHEMA_VERSION,
+        "updated_at": utc_timestamp(),
+        "manifest": manifest or "",
+        "output_dir": output_dir or "",
+        "rows": rows or [],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+
+
+def load_download_queue_state(path):
+    """Load the latest persistent download queue state."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    return payload if isinstance(payload, dict) else {}

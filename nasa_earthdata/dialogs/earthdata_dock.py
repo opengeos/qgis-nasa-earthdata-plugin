@@ -11,6 +11,7 @@ import platform
 import tempfile
 import time
 import uuid
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -57,23 +58,34 @@ from qgis.core import (
 from ..core.net import https_only_urlopen
 from ..core.workflows import (
     build_search_preset,
+    cmr_collection_summary,
+    cmr_collection_url,
     cog_links_from_links,
     delete_recent_search,
     delete_search_preset,
     download_manifest_path,
+    download_queue_state_path,
     granule_export_row,
+    granule_citation_links,
     granule_links,
     granule_native_id,
+    granule_quicklook_links,
     granules_to_export_rows,
+    granules_to_stac_item_collection,
     likely_existing_download_files,
+    load_download_queue_state,
     load_recent_searches,
     load_search_presets,
     record_recent_search,
     upsert_search_preset,
     workflow_dir,
     write_download_manifest,
+    write_download_queue_state,
+    write_granules_json,
+    write_results_stac,
     write_results_csv,
     write_results_geojson,
+    write_workflow_bundle,
 )
 
 # NASA Earthdata TSV URL
@@ -291,6 +303,34 @@ class CatalogLoadWorker(QThread):
             catalog = CatalogData(rows)
             self.finished.emit(catalog, catalog.get_dataset_items())
 
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class CollectionInfoWorker(QThread):
+    """Worker thread for fetching live CMR collection metadata."""
+
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, dataset_item, parent=None):
+        super().__init__(parent)
+        self.dataset_item = dataset_item or {}
+
+    def run(self):
+        """Fetch and summarize one CMR collection."""
+        try:
+            url = cmr_collection_url(self.dataset_item)
+            if not url:
+                self.error.emit("No dataset selected")
+                return
+            with https_only_urlopen(url, timeout=30) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            summary = cmr_collection_summary(payload)
+            if not summary:
+                self.error.emit("No CMR collection metadata found")
+                return
+            self.finished.emit(summary)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -856,12 +896,16 @@ class EarthdataDockWidget(QDockWidget):
         self._last_download_granules = []
         self._last_download_output_dir = ""
         self._last_download_rows = []
+        self._last_download_manifest = ""
+        self._alert_worker = None
+        self._alert_baseline_ids = set()
 
         # Workers
         self._catalog_worker = None
         self._search_worker = None
         self._download_worker = None
         self._cog_worker = None
+        self._collection_worker = None
 
         self._setup_ui()
         self._load_datasets()
@@ -1011,6 +1055,19 @@ class EarthdataDockWidget(QDockWidget):
         self.delete_recent_btn.clicked.connect(self._delete_selected_recent)
         recent_layout.addWidget(self.delete_recent_btn)
         search_layout.addRow("Recent:", recent_layout)
+
+        collection_layout = QHBoxLayout()
+        self.collection_info_btn = QPushButton("Collection Info")
+        self.collection_info_btn.clicked.connect(self._show_collection_info)
+        collection_layout.addWidget(self.collection_info_btn)
+        self.check_new_btn = QPushButton("Check New")
+        self.check_new_btn.setToolTip(
+            "Run the selected saved/recent search and report granules not in the current results"
+        )
+        self.check_new_btn.clicked.connect(self._check_new_granules)
+        collection_layout.addWidget(self.check_new_btn)
+        collection_layout.addStretch()
+        search_layout.addRow("Discovery:", collection_layout)
 
         self.search_section_check = self._add_collapsible_section(
             layout, "Search Parameters", search_group, checked=True
@@ -1184,6 +1241,29 @@ class EarthdataDockWidget(QDockWidget):
             results_layout, "Granule Details", details_group, checked=False
         )
 
+        preview_group = QGroupBox()
+        preview_layout = QVBoxLayout(preview_group)
+        self.preview_text = QTextEdit()
+        self.preview_text.setReadOnly(True)
+        self.preview_text.setMinimumHeight(70)
+        self.preview_text.setMaximumHeight(130)
+        self.preview_text.setPlaceholderText("Select a result to see quicklook and citation links...")
+        preview_layout.addWidget(self.preview_text)
+        preview_btn_layout = QHBoxLayout()
+        self.open_quicklook_btn = QPushButton("Open Quicklook")
+        self.open_quicklook_btn.setEnabled(False)
+        self.open_quicklook_btn.clicked.connect(self._open_selected_quicklook)
+        preview_btn_layout.addWidget(self.open_quicklook_btn)
+        self.copy_context_btn = QPushButton("AI Context")
+        self.copy_context_btn.setEnabled(False)
+        self.copy_context_btn.clicked.connect(self._send_context_to_ai_assistant)
+        preview_btn_layout.addWidget(self.copy_context_btn)
+        preview_btn_layout.addStretch()
+        preview_layout.addLayout(preview_btn_layout)
+        self.preview_section_check = self._add_collapsible_section(
+            results_layout, "Quicklook and Citation", preview_group, checked=False
+        )
+
         # COG file selection controls
         cog_mode_layout = QHBoxLayout()
         cog_mode_layout.addWidget(QLabel("COG Mode:"))
@@ -1230,6 +1310,32 @@ class EarthdataDockWidget(QDockWidget):
         self.rgb_channel_widget.setVisible(False)
         results_layout.addWidget(self.rgb_channel_widget)
 
+        index_group = QGroupBox()
+        index_layout = QFormLayout(index_group)
+        self.index_type_combo = QComboBox()
+        self.index_type_combo.addItem("NDVI", "ndvi")
+        self.index_type_combo.addItem("NDWI", "ndwi")
+        self.index_type_combo.addItem("MNDWI", "mndwi")
+        self.index_type_combo.addItem("NDMI", "ndmi")
+        self.index_type_combo.addItem("NBR", "nbr")
+        self.index_type_combo.currentIndexChanged.connect(self._on_index_type_changed)
+        index_layout.addRow("Index:", self.index_type_combo)
+        self.index_positive_combo = QComboBox()
+        self.index_negative_combo = QComboBox()
+        for combo in (self.index_positive_combo, self.index_negative_combo):
+            combo.setEnabled(False)
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+            combo.setMinimumContentsLength(18)
+        index_layout.addRow("Positive band:", self.index_positive_combo)
+        index_layout.addRow("Negative band:", self.index_negative_combo)
+        self.create_index_btn = QPushButton("Create Index VRT")
+        self.create_index_btn.setEnabled(False)
+        self.create_index_btn.clicked.connect(self._create_index_vrt)
+        index_layout.addRow("", self.create_index_btn)
+        self.index_section_check = self._add_collapsible_section(
+            results_layout, "Analysis-Ready Index", index_group, checked=False
+        )
+
         # Zoom to footprints button and results info
         info_layout = QHBoxLayout()
         self.zoom_footprints_btn = QPushButton("Zoom to Footprints")
@@ -1244,6 +1350,18 @@ class EarthdataDockWidget(QDockWidget):
         self.export_geojson_btn.setEnabled(False)
         self.export_geojson_btn.clicked.connect(self._export_results_geojson)
         info_layout.addWidget(self.export_geojson_btn)
+        self.export_json_btn = QPushButton("Export JSON")
+        self.export_json_btn.setEnabled(False)
+        self.export_json_btn.clicked.connect(self._export_results_json)
+        info_layout.addWidget(self.export_json_btn)
+        self.export_stac_btn = QPushButton("Export STAC")
+        self.export_stac_btn.setEnabled(False)
+        self.export_stac_btn.clicked.connect(self._export_results_stac)
+        info_layout.addWidget(self.export_stac_btn)
+        self.export_bundle_btn = QPushButton("Bundle")
+        self.export_bundle_btn.setEnabled(False)
+        self.export_bundle_btn.clicked.connect(self._export_workflow_bundle)
+        info_layout.addWidget(self.export_bundle_btn)
         info_layout.addStretch()
         results_layout.addLayout(info_layout)
 
@@ -1319,6 +1437,7 @@ class EarthdataDockWidget(QDockWidget):
 
         self._load_presets_into_combo()
         self._load_recent_into_combo()
+        self._load_persistent_download_queue()
 
     def _add_collapsible_section(self, layout, title, widget, checked=True, stretch=0):
         """Add a checkbox-controlled section to a layout."""
@@ -1673,11 +1792,18 @@ class EarthdataDockWidget(QDockWidget):
         self.zoom_footprints_btn.setEnabled(False)
         self.export_csv_btn.setEnabled(False)
         self.export_geojson_btn.setEnabled(False)
+        self.export_json_btn.setEnabled(False)
+        self.export_stac_btn.setEnabled(False)
+        self.export_bundle_btn.setEnabled(False)
+        self.copy_context_btn.setEnabled(False)
+        self.open_quicklook_btn.setEnabled(False)
         self.details_text.clear()
+        self.preview_text.clear()
         self.cog_list.clear()
         self.cog_list.setEnabled(False)
         self.cog_mode_combo.setEnabled(False)
         self._clear_rgb_channel_combos()
+        self._clear_index_combos()
         self._search_results = None
         self._search_gdf = None
         self._remove_footprints()
@@ -2073,6 +2199,10 @@ class EarthdataDockWidget(QDockWidget):
         self.zoom_footprints_btn.setEnabled(True)
         self.export_csv_btn.setEnabled(True)
         self.export_geojson_btn.setEnabled(True)
+        self.export_json_btn.setEnabled(True)
+        self.export_stac_btn.setEnabled(True)
+        self.export_bundle_btn.setEnabled(True)
+        self.copy_context_btn.setEnabled(True)
         self._update_granule_details()
 
     def _on_search_error(self, error_msg):
@@ -2361,9 +2491,11 @@ class EarthdataDockWidget(QDockWidget):
             self.cog_list.setEnabled(False)
             self.cog_mode_combo.setEnabled(False)
             self._clear_rgb_channel_combos()
+            self._clear_index_combos()
 
         self._sync_footprint_selection_from_table()
         self._update_granule_details()
+        self._update_quicklook_preview()
 
     def _get_result_index_for_table_row(self, table_row):
         """Map current table row (after sorting) to original search result index."""
@@ -2439,6 +2571,85 @@ class EarthdataDockWidget(QDockWidget):
         lines.extend(links or ["No links available"])
         self.details_text.setPlainText("\n".join(str(line) for line in lines))
 
+    def _update_quicklook_preview(self):
+        """Update quicklook/citation links for the selected granule."""
+        if not self._search_results:
+            self.preview_text.clear()
+            self.open_quicklook_btn.setEnabled(False)
+            return
+
+        result_index = self._first_selected_result_index()
+        if result_index < 0 or result_index >= len(self._search_results):
+            self.preview_text.setPlainText("Select a result to inspect preview links.")
+            self.open_quicklook_btn.setEnabled(False)
+            return
+
+        granule = self._search_results[result_index]
+        quicklooks = granule_quicklook_links(granule)
+        citations = granule_citation_links(granule)
+        lines = ["Quicklook / browse links:"]
+        lines.extend(quicklooks or ["No quicklook links found."])
+        lines.extend(["", "Citation / documentation links:"])
+        lines.extend(citations or ["No citation links found."])
+        self.preview_text.setPlainText("\n".join(lines))
+        self.open_quicklook_btn.setEnabled(bool(quicklooks))
+
+    def _open_selected_quicklook(self):
+        """Open the first quicklook link for the selected granule."""
+        result_index = self._first_selected_result_index()
+        if result_index < 0 or not self._search_results:
+            return
+        quicklooks = granule_quicklook_links(self._search_results[result_index])
+        if quicklooks:
+            webbrowser.open(quicklooks[0])
+
+    def ai_context_summary(self):
+        """Return a compact text summary of current NASA Earthdata context."""
+        dataset = self.dataset_combo.currentData() or {}
+        selected_indices = self._get_selected_result_indices()
+        if not selected_indices and self._search_results:
+            selected_indices = [0]
+        lines = [
+            "NASA Earthdata QGIS plugin context",
+            f"Dataset: {dataset.get('label') or dataset.get('short_name', '')}",
+            f"Concept ID: {dataset.get('concept_id', '')}",
+            f"BBox: {self.bbox_input.text().strip()}",
+            f"Date range: {self.start_date.date().toString('yyyy-MM-dd')} to {self.end_date.date().toString('yyyy-MM-dd')}",
+            f"Result count: {len(self._search_results or [])}",
+        ]
+        if selected_indices:
+            lines.append("Selected granules:")
+        for index in selected_indices[:8]:
+            if self._search_results and 0 <= index < len(self._search_results):
+                granule = self._search_results[index]
+                links = granule_links(granule)
+                cogs = cog_links_from_links(links)
+                lines.append(f"- {granule_native_id(granule, f'Item {index + 1}')}")
+                if cogs:
+                    lines.append(f"  COGs: {', '.join(cogs[:5])}")
+        if len(selected_indices) > 8:
+            lines.append(f"...and {len(selected_indices) - 8} more selected granules")
+        return "\n".join(lines)
+
+    def _send_context_to_ai_assistant(self):
+        """Open OpenGeoAgent and make current plugin context available."""
+        try:
+            plugin = getattr(self.iface, "_nasa_earthdata_plugin", None)
+            if plugin is not None and hasattr(plugin, "open_ai_assistant"):
+                plugin.open_ai_assistant(context=self.ai_context_summary())
+                return
+        except Exception:
+            pass  # nosec B110
+
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(self.ai_context_summary())
+        QMessageBox.information(
+            self,
+            "AI Context",
+            "Current NASA Earthdata context was copied to the clipboard.",
+        )
+
     def _export_rows(self):
         """Return export rows for all current results."""
         return granules_to_export_rows(
@@ -2498,6 +2709,239 @@ class EarthdataDockWidget(QDockWidget):
             self._notify_success("NASA Earthdata", "Exported result footprints")
         except Exception as e:
             QMessageBox.critical(self, "Export GeoJSON", f"Failed to export:\n{e}")
+
+    def _export_results_json(self):
+        """Export raw current granule results to JSON."""
+        if not self._search_results:
+            QMessageBox.information(
+                self, "Export Results", "No search results to export."
+            )
+            return
+
+        default_path = str(workflow_dir(self.settings) / "earthdata_granules.json")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export NASA Earthdata Granules JSON",
+            default_path,
+            "JSON Files (*.json)",
+        )
+        if not file_path:
+            return
+
+        try:
+            write_granules_json(file_path, self._search_results)
+            self._log(f"Exported raw granules: {file_path}")
+            self._notify_success("NASA Earthdata", "Exported raw granules JSON")
+        except Exception as e:
+            QMessageBox.critical(self, "Export JSON", f"Failed to export:\n{e}")
+
+    def _export_results_stac(self):
+        """Export current results to a STAC ItemCollection."""
+        if not self._search_results:
+            QMessageBox.information(
+                self, "Export Results", "No search results to export."
+            )
+            return
+
+        default_path = str(workflow_dir(self.settings) / "earthdata_stac.json")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export NASA Earthdata STAC ItemCollection",
+            default_path,
+            "JSON Files (*.json)",
+        )
+        if not file_path:
+            return
+
+        try:
+            write_results_stac(
+                file_path,
+                self._search_results,
+                self.dataset_combo.currentData() or {},
+                self._search_gdf,
+            )
+            self._log(f"Exported STAC ItemCollection: {file_path}")
+            self._notify_success("NASA Earthdata", "Exported STAC ItemCollection")
+        except Exception as e:
+            QMessageBox.critical(self, "Export STAC", f"Failed to export:\n{e}")
+
+    def _export_workflow_bundle(self):
+        """Export a reproducible bundle with search, results, granules, and STAC."""
+        if not self._search_results:
+            QMessageBox.information(
+                self, "Export Workflow Bundle", "No search results to bundle."
+            )
+            return
+
+        default_path = str(workflow_dir(self.settings) / "earthdata_workflow_bundle.json")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export NASA Earthdata Workflow Bundle",
+            default_path,
+            "JSON Files (*.json)",
+        )
+        if not file_path:
+            return
+
+        try:
+            dataset_item = self.dataset_combo.currentData() or {}
+            stac = granules_to_stac_item_collection(
+                self._search_results, dataset_item, self._search_gdf
+            )
+            write_workflow_bundle(
+                file_path,
+                self._current_search_preset("Workflow Bundle Search"),
+                self._search_results,
+                self._export_rows(),
+                stac_item_collection=stac,
+                manifest=self._last_download_manifest,
+            )
+            self._log(f"Exported workflow bundle: {file_path}")
+            self._notify_success("NASA Earthdata", "Exported workflow bundle")
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Export Workflow Bundle", f"Failed to export:\n{e}"
+            )
+
+    def _show_collection_info(self):
+        """Fetch and show live CMR collection metadata."""
+        dataset_item = self.dataset_combo.currentData() or {}
+        if not dataset_item:
+            QMessageBox.information(self, "Collection Info", "Select a dataset first.")
+            return
+        self.collection_info_btn.setEnabled(False)
+        self._log("Fetching live CMR collection metadata...")
+        self._collection_worker = CollectionInfoWorker(dataset_item)
+        self._collection_worker.finished.connect(self._on_collection_info_finished)
+        self._collection_worker.error.connect(self._on_collection_info_error)
+        self._collection_worker.start()
+
+    def _on_collection_info_finished(self, summary):
+        """Display fetched collection metadata."""
+        self.collection_info_btn.setEnabled(True)
+        lines = [
+            f"Title: {summary.get('title', '')}",
+            f"Short Name: {summary.get('short_name', '')}",
+            f"Concept ID: {summary.get('concept_id', '')}",
+            f"Provider: {summary.get('provider', '')}",
+            f"Version: {summary.get('version_id', '')}",
+            f"Cloud Hosted: {summary.get('cloud_hosted', False)}",
+            f"Temporal Start: {summary.get('time_start', '')}",
+            f"Temporal End: {summary.get('time_end', '')}",
+            f"DOI: {summary.get('doi', '')}",
+            "",
+            "Summary:",
+            summary.get("summary", ""),
+            "",
+            "Links:",
+        ]
+        lines.extend(summary.get("links", []) or ["No links available"])
+        QMessageBox.information(self, "Collection Info", "\n".join(lines))
+        self._log(f"Loaded collection info for {summary.get('short_name', '')}")
+
+    def _on_collection_info_error(self, error_msg):
+        """Handle CMR collection info errors."""
+        self.collection_info_btn.setEnabled(True)
+        self._log(f"Collection info error: {error_msg}", error=True)
+        QMessageBox.warning(
+            self, "Collection Info", f"Could not load collection metadata:\n{error_msg}"
+        )
+
+    def _check_new_granules(self):
+        """Run the selected saved/recent search and report granules not in current results."""
+        preset = self.preset_combo.currentData() or self.recent_combo.currentData()
+        if not preset:
+            QMessageBox.information(
+                self, "Check New Granules", "Select a saved or recent search first."
+            )
+            return
+
+        current_results = self._search_results or []
+        self._alert_baseline_ids = {
+            granule_native_id(granule, f"Item {index + 1}")
+            for index, granule in enumerate(current_results)
+        }
+        self._apply_search_preset(preset)
+        dataset_item = self.dataset_combo.currentData() or {}
+        advanced = self._current_advanced_options()
+        bbox = None
+        bbox_text = self.bbox_input.text().strip()
+        if bbox_text:
+            try:
+                parts = [float(x.strip()) for x in bbox_text.split(",")]
+                if len(parts) != 4:
+                    raise ValueError("Bounding box must have 4 values")
+                bbox = tuple(parts)
+            except Exception as e:
+                self.check_new_btn.setEnabled(True)
+                QMessageBox.warning(
+                    self,
+                    "Check New Granules",
+                    f"Invalid bounding box in selected search:\n{e}",
+                )
+                return
+        temporal = (
+            self.start_date.date().toString("yyyy-MM-dd"),
+            self.end_date.date().toString("yyyy-MM-dd"),
+        )
+        orbit_number = None
+        if advanced.get("orbit_min") or advanced.get("orbit_max"):
+            if advanced.get("orbit_min") and advanced.get("orbit_max"):
+                orbit_number = (advanced["orbit_min"], advanced["orbit_max"])
+            else:
+                orbit_number = advanced.get("orbit_min") or advanced.get("orbit_max")
+
+        self.check_new_btn.setEnabled(False)
+        self._log(f"Checking for new granules in {preset.get('name', 'search')}...")
+        self._alert_worker = DataSearchWorker(
+            dataset_item.get("short_name", ""),
+            dataset_item.get("concept_id", ""),
+            bbox,
+            temporal,
+            self.max_items_spin.value(),
+            cloud_cover=(
+                advanced.get("cloud_min", 0),
+                advanced.get("cloud_max", 100),
+            )
+            if advanced.get("cloud_min", 0) > 0
+            or advanced.get("cloud_max", 100) < 100
+            else None,
+            day_night=advanced.get("day_night"),
+            provider=advanced.get("provider") or None,
+            version=advanced.get("version") or None,
+            granule_id=advanced.get("granule_id") or None,
+            orbit_number=orbit_number,
+        )
+        self._alert_worker.finished.connect(self._on_check_new_finished)
+        self._alert_worker.error.connect(self._on_check_new_error)
+        self._alert_worker.progress.connect(self._log)
+        self._alert_worker.start()
+
+    def _on_check_new_finished(self, results, _gdf):
+        """Report saved-search delta results."""
+        self.check_new_btn.setEnabled(True)
+        new_ids = []
+        for index, granule in enumerate(results or []):
+            native_id = granule_native_id(granule, f"Item {index + 1}")
+            if native_id not in self._alert_baseline_ids:
+                new_ids.append(native_id)
+        message = (
+            f"Found {len(new_ids)} new granule(s) out of {len(results or [])} checked."
+        )
+        if new_ids:
+            message += "\n\n" + "\n".join(new_ids[:25])
+            if len(new_ids) > 25:
+                message += f"\n...and {len(new_ids) - 25} more"
+        self._log(message)
+        QMessageBox.information(self, "Check New Granules", message)
+
+    def _on_check_new_error(self, error_msg):
+        """Handle saved-search delta check errors."""
+        self.check_new_btn.setEnabled(True)
+        self._log(f"Check new granules error: {error_msg}", error=True)
+        QMessageBox.warning(
+            self, "Check New Granules", f"Could not check for new granules:\n{error_msg}"
+        )
 
     def _sync_footprint_selection_from_table(self):
         """Highlight footprint features matching selected table rows."""
@@ -2734,6 +3178,13 @@ class EarthdataDockWidget(QDockWidget):
             combo.clear()
             combo.setEnabled(False)
 
+    def _clear_index_combos(self):
+        """Clear and disable spectral index band selectors."""
+        for combo in (self.index_positive_combo, self.index_negative_combo):
+            combo.clear()
+            combo.setEnabled(False)
+        self.create_index_btn.setEnabled(False)
+
     def _populate_rgb_channel_combos(self, cog_links):
         """Populate RGB channel selectors and choose common natural-color bands."""
         channel_combos = (
@@ -2752,6 +3203,7 @@ class EarthdataDockWidget(QDockWidget):
         for combo, index in zip(channel_combos, defaults):
             if 0 <= index < combo.count():
                 combo.setCurrentIndex(index)
+        self._populate_index_band_combos(cog_links)
 
     def _guess_rgb_channel_indices(self, cog_links):
         """Guess Red/Green/Blue defaults from common COG filename band tokens."""
@@ -2776,6 +3228,182 @@ class EarthdataDockWidget(QDockWidget):
             green if green >= 0 else fallback[1],
             blue if blue >= 0 else fallback[2],
         )
+
+    def _guess_index_channel_indices(self, cog_links, index_name):
+        """Guess positive/negative bands for common normalized differences."""
+        band_pairs = {
+            "ndvi": (("b05", "b8", "nir"), ("b04", "b4", "red")),
+            "ndwi": (("b03", "b3", "green"), ("b05", "b8", "nir")),
+            "mndwi": (("b03", "b3", "green"), ("b06", "b11", "swir")),
+            "ndmi": (("b05", "b8", "nir"), ("b06", "b11", "swir")),
+            "nbr": (("b05", "b8", "nir"), ("b07", "b12", "swir")),
+        }
+        positive_tokens, negative_tokens = band_pairs.get(
+            index_name, band_pairs["ndvi"]
+        )
+
+        def find_band(tokens):
+            for idx, link in enumerate(cog_links):
+                name = os.path.basename(link).split("?")[0].lower()
+                normalized = name.replace("-", "_").replace(".", "_")
+                for token in tokens:
+                    token = token.lower()
+                    if token in name or f"_{token}_" in f"_{normalized}_":
+                        return idx
+            return -1
+
+        positive = find_band(positive_tokens)
+        negative = find_band(negative_tokens)
+        fallback = list(range(min(2, len(cog_links))))
+        while len(fallback) < 2:
+            fallback.append(-1)
+        return (
+            positive if positive >= 0 else fallback[0],
+            negative if negative >= 0 else fallback[1],
+        )
+
+    def _populate_index_band_combos(self, cog_links):
+        """Populate spectral index selectors."""
+        for combo in (self.index_positive_combo, self.index_negative_combo):
+            combo.clear()
+            for link in cog_links:
+                filename = os.path.basename(link).split("?")[0]
+                combo.addItem(filename, link)
+            combo.setEnabled(bool(cog_links))
+
+        positive, negative = self._guess_index_channel_indices(
+            cog_links, self.index_type_combo.currentData() or "ndvi"
+        )
+        for combo, index in (
+            (self.index_positive_combo, positive),
+            (self.index_negative_combo, negative),
+        ):
+            if 0 <= index < combo.count():
+                combo.setCurrentIndex(index)
+        self.create_index_btn.setEnabled(len(cog_links) >= 2)
+
+    def _on_index_type_changed(self, _index):
+        """Refresh guessed index bands when the index type changes."""
+        links = [
+            self.index_positive_combo.itemData(row)
+            for row in range(self.index_positive_combo.count())
+            if self.index_positive_combo.itemData(row)
+        ]
+        if links:
+            self._populate_index_band_combos(links)
+
+    def _write_normalized_difference_vrt(self, output_path, positive, negative, label):
+        """Write a VRT that computes (positive - negative) / (positive + negative)."""
+        from osgeo import gdal
+
+        def source_path(value):
+            return f"/vsicurl/{value}" if value.lower().startswith("http") else value
+
+        gdal.SetConfigOption("GDAL_VRT_ENABLE_PYTHON", "YES")
+        gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+        gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF")
+        positive_path = source_path(positive)
+        negative_path = source_path(negative)
+        source_ds = gdal.Open(positive_path)
+        if source_ds is None:
+            raise RuntimeError("Could not open positive band source")
+        width = source_ds.RasterXSize
+        height = source_ds.RasterYSize
+        projection = source_ds.GetProjectionRef() or ""
+        geotransform = source_ds.GetGeoTransform(can_return_null=True)
+        geotransform_text = (
+            ", ".join(f"{value:.16g}" for value in geotransform)
+            if geotransform
+            else ""
+        )
+        source_ds = None
+
+        def esc(text):
+            return (
+                str(text)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+
+        code = """
+import numpy as np
+
+def normalized_difference(in_ar, out_ar, xoff, yoff, xsize, ysize,
+                          raster_xsize, raster_ysize, buf_radius, gt, **kwargs):
+    positive = in_ar[0].astype("float32")
+    negative = in_ar[1].astype("float32")
+    denominator = positive + negative
+    out_ar[:] = np.where(denominator == 0, 0, (positive - negative) / denominator)
+""".strip()
+        lines = [
+            f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">',
+        ]
+        if projection:
+            lines.append(f"  <SRS>{esc(projection)}</SRS>")
+        if geotransform_text:
+            lines.append(f"  <GeoTransform>{geotransform_text}</GeoTransform>")
+        lines.extend(
+            [
+                '  <VRTRasterBand dataType="Float32" band="1" subClass="VRTDerivedRasterBand">',
+                f"    <Description>{esc(label.upper())}</Description>",
+                "    <PixelFunctionType>normalized_difference</PixelFunctionType>",
+                "    <PixelFunctionLanguage>Python</PixelFunctionLanguage>",
+                f"    <PixelFunctionCode><![CDATA[{code}]]></PixelFunctionCode>",
+            ]
+        )
+        for path in (positive_path, negative_path):
+            lines.extend(
+                [
+                    "    <SimpleSource>",
+                    f"      <SourceFilename relativeToVRT=\"0\">{esc(path)}</SourceFilename>",
+                    "      <SourceBand>1</SourceBand>",
+                    "      <SrcRect xOff=\"0\" yOff=\"0\" xSize=\"{}\" ySize=\"{}\"/>".format(width, height),
+                    "      <DstRect xOff=\"0\" yOff=\"0\" xSize=\"{}\" ySize=\"{}\"/>".format(width, height),
+                    "    </SimpleSource>",
+                ]
+            )
+        lines.extend(["  </VRTRasterBand>", "</VRTDataset>"])
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+    def _create_index_vrt(self):
+        """Create and add a normalized-difference VRT from selected COG bands."""
+        positive = self.index_positive_combo.currentData()
+        negative = self.index_negative_combo.currentData()
+        index_name = self.index_type_combo.currentData() or "ndvi"
+        if not positive or not negative:
+            QMessageBox.warning(self, "Create Index VRT", "Select two input bands.")
+            return
+        if positive == negative:
+            QMessageBox.warning(
+                self, "Create Index VRT", "Select two different input bands."
+            )
+            return
+
+        output_path = os.path.join(
+            tempfile.gettempdir(),
+            f"nasa_earthdata_{index_name}_{uuid.uuid4().hex}.vrt",
+        )
+        try:
+            self._write_normalized_difference_vrt(
+                output_path, positive, negative, index_name
+            )
+            layer = QgsRasterLayer(output_path, f"NASA Earthdata {index_name.upper()}")
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+                self._log(f"Added {index_name.upper()} VRT: {output_path}")
+                self._notify_success(
+                    "NASA Earthdata", f"Added {index_name.upper()} layer"
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Create Index VRT",
+                    "The VRT was written but QGIS could not load it as a raster.",
+                )
+        except Exception as e:
+            QMessageBox.critical(self, "Create Index VRT", f"Failed to create VRT:\n{e}")
 
     def _get_selected_cog_urls(self):
         """Return selected COG URLs from the list in visual row order."""
@@ -2835,6 +3463,33 @@ class EarthdataDockWidget(QDockWidget):
                 item = QTableWidgetItem(str(value))
                 item.setToolTip(str(value))
                 self.download_queue_table.setItem(index, column, item)
+        self._fit_download_columns_to_width()
+
+    def _load_persistent_download_queue(self):
+        """Restore the last download queue snapshot, if available."""
+        try:
+            state = load_download_queue_state(download_queue_state_path(self.settings))
+        except Exception as e:
+            self._log(f"Could not load previous download queue: {e}", error=True)
+            return
+        rows = state.get("rows") or []
+        if not rows:
+            return
+        self.download_queue_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            values = [
+                row.get("native_id", ""),
+                row.get("status", ""),
+                row.get("message", ""),
+                "\n".join(str(path) for path in row.get("files", [])),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
+                self.download_queue_table.setItem(row_index, column, item)
+        self._last_download_rows = rows
+        self._last_download_manifest = state.get("manifest", "")
+        self._last_download_output_dir = state.get("output_dir", "")
         self._fit_download_columns_to_width()
 
     def _on_download_queue_update(self, row, status, message, files):
@@ -3160,6 +3815,16 @@ class EarthdataDockWidget(QDockWidget):
         self.cancel_download_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
         self._last_download_rows = queue_rows
+        self._last_download_manifest = manifest
+        try:
+            write_download_queue_state(
+                download_queue_state_path(self.settings),
+                queue_rows,
+                manifest=manifest,
+                output_dir=self._last_download_output_dir,
+            )
+        except Exception as e:
+            self._log(f"Could not persist download queue: {e}", error=True)
 
         failed_count = len([row for row in queue_rows if row.get("status") == "failed"])
         self.retry_failed_btn.setEnabled(failed_count > 0)
