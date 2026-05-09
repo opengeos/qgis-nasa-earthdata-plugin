@@ -42,6 +42,7 @@ from qgis.PyQt.QtWidgets import (
     QSizePolicy,
     QListWidget,
     QListWidgetItem,
+    QInputDialog,
 )
 from qgis.PyQt.QtGui import QFont
 from qgis.core import (
@@ -54,6 +55,26 @@ from qgis.core import (
 )
 
 from ..core.net import https_only_urlopen
+from ..core.workflows import (
+    build_search_preset,
+    cog_links_from_links,
+    delete_recent_search,
+    delete_search_preset,
+    download_manifest_path,
+    granule_export_row,
+    granule_links,
+    granule_native_id,
+    granules_to_export_rows,
+    likely_existing_download_files,
+    load_recent_searches,
+    load_search_presets,
+    record_recent_search,
+    upsert_search_preset,
+    workflow_dir,
+    write_download_manifest,
+    write_results_csv,
+    write_results_geojson,
+)
 
 # NASA Earthdata TSV URL
 NASA_DATA_URL = (
@@ -221,39 +242,49 @@ class CatalogLoadWorker(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, force_refresh=False, parent=None):
+    def __init__(
+        self,
+        force_refresh=False,
+        catalog_url=None,
+        cache_dir=None,
+        cache_enabled=True,
+        parent=None,
+    ):
         super().__init__(parent)
         self.force_refresh = force_refresh
+        self.catalog_url = catalog_url or NASA_DATA_URL
+        self.cache_dir = Path(cache_dir).expanduser() if cache_dir else CACHE_DIR
+        self.cache_enabled = cache_enabled
 
     def run(self):
         """Load the catalog from cache or download."""
         try:
             import csv
 
-            # Ensure cache directory exists
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            cache_file = self.cache_dir / CATALOG_CACHE_FILE.name
+            if self.cache_enabled:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
 
             # Check if cache exists and is fresh
             use_cache = False
-            if not self.force_refresh and CATALOG_CACHE_FILE.exists():
-                cache_age = (
-                    datetime.now().timestamp() - CATALOG_CACHE_FILE.stat().st_mtime
-                )
+            if self.cache_enabled and not self.force_refresh and cache_file.exists():
+                cache_age = datetime.now().timestamp() - cache_file.stat().st_mtime
                 if cache_age < CATALOG_CACHE_MAX_AGE_DAYS * 24 * 3600:
                     use_cache = True
                     self.progress.emit("Loading catalog from cache...")
 
             if use_cache:
-                with open(CATALOG_CACHE_FILE, "r", encoding="utf-8") as f:
+                with open(cache_file, "r", encoding="utf-8") as f:
                     reader = csv.DictReader(f, delimiter="\t")
                     rows = list(reader)
             else:
                 self.progress.emit("Downloading NASA Earthdata catalog...")
-                with https_only_urlopen(NASA_DATA_URL, timeout=30) as resp:
+                with https_only_urlopen(self.catalog_url, timeout=30) as resp:
                     text = resp.read().decode("utf-8")
                 # Save raw TSV to cache
-                with open(CATALOG_CACHE_FILE, "w", encoding="utf-8") as f:
-                    f.write(text)
+                if self.cache_enabled:
+                    with open(cache_file, "w", encoding="utf-8") as f:
+                        f.write(text)
                 reader = csv.DictReader(text.splitlines(), delimiter="\t")
                 rows = list(reader)
 
@@ -663,33 +694,125 @@ class COGDisplayWorker(QThread):
 class DataDownloadWorker(QThread):
     """Worker thread for downloading NASA Earthdata."""
 
-    finished = pyqtSignal(list)  # downloaded files
+    finished = pyqtSignal(list, str, list)  # downloaded files, manifest, queue rows
     error = pyqtSignal(str)
     progress = pyqtSignal(int, str)
+    queue_update = pyqtSignal(int, str, str, list)  # row, status, message, files
 
-    def __init__(self, granules, output_dir, parent=None):
+    def __init__(
+        self,
+        granules,
+        output_dir,
+        threads=1,
+        skip_existing=True,
+        parent=None,
+    ):
         super().__init__(parent)
         self.granules = granules
         self.output_dir = output_dir
+        self.threads = max(1, int(threads or 1))
+        self.skip_existing = skip_existing
+        self._cancelled = False
+
+    def cancel(self):
+        """Request cancellation after the current granule finishes."""
+        self._cancelled = True
 
     def run(self):
         """Execute the download."""
         try:
+            import inspect
+
             from ..core.venv_manager import import_earthaccess
 
             earthaccess = import_earthaccess()
 
-            self.progress.emit(10, "Authenticating...")
+            total = len(self.granules or [])
+            if total == 0:
+                self.finished.emit([], "", [])
+                return
 
-            self.progress.emit(30, "Downloading files...")
+            self.progress.emit(5, "Preparing download queue...")
+            downloaded_files = []
+            queue_rows = []
+            download_kwargs = {"local_path": self.output_dir}
+            try:
+                signature = inspect.signature(earthaccess.download)
+                if "threads" in signature.parameters:
+                    download_kwargs["threads"] = self.threads
+                elif "n_threads" in signature.parameters:
+                    download_kwargs["n_threads"] = self.threads
+            except Exception:
+                pass  # nosec B110
 
-            files = earthaccess.download(
-                self.granules,
-                local_path=self.output_dir,
-            )
+            for index, granule in enumerate(self.granules):
+                native_id = granule_native_id(granule, f"Item {index + 1}")
+                if self._cancelled:
+                    row = {
+                        "index": index,
+                        "native_id": native_id,
+                        "status": "cancelled",
+                        "message": "Cancelled before download",
+                        "files": [],
+                    }
+                    queue_rows.append(row)
+                    self.queue_update.emit(index, "cancelled", row["message"], [])
+                    continue
 
-            self.progress.emit(100, "Download complete!")
-            self.finished.emit(files)
+                existing = (
+                    likely_existing_download_files(granule, self.output_dir)
+                    if self.skip_existing
+                    else []
+                )
+                if existing:
+                    message = f"Skipped {len(existing)} existing file(s)"
+                    row = {
+                        "index": index,
+                        "native_id": native_id,
+                        "status": "skipped",
+                        "message": message,
+                        "files": existing,
+                    }
+                    queue_rows.append(row)
+                    downloaded_files.extend(existing)
+                    self.queue_update.emit(index, "skipped", message, existing)
+                    continue
+
+                percent = int((index / total) * 90) + 5
+                self.progress.emit(
+                    percent, f"Downloading {index + 1}/{total}: {native_id}"
+                )
+                self.queue_update.emit(index, "running", "Downloading...", [])
+                try:
+                    files = earthaccess.download([granule], **download_kwargs) or []
+                    files = [str(file_path) for file_path in files]
+                    downloaded_files.extend(files)
+                    message = f"Downloaded {len(files)} file(s)"
+                    row = {
+                        "index": index,
+                        "native_id": native_id,
+                        "status": "done",
+                        "message": message,
+                        "files": files,
+                    }
+                    queue_rows.append(row)
+                    self.queue_update.emit(index, "done", message, files)
+                except Exception as e:
+                    message = str(e)
+                    row = {
+                        "index": index,
+                        "native_id": native_id,
+                        "status": "failed",
+                        "message": message,
+                        "files": [],
+                    }
+                    queue_rows.append(row)
+                    self.queue_update.emit(index, "failed", message, [])
+
+            manifest = str(download_manifest_path(self.output_dir))
+            write_download_manifest(manifest, queue_rows)
+            self.progress.emit(100, "Download queue complete!")
+            self.finished.emit(downloaded_files, manifest, queue_rows)
 
         except Exception as e:
             self.error.emit(str(e))
@@ -727,6 +850,12 @@ class EarthdataDockWidget(QDockWidget):
         self._bbox_map_tool = None
         self._previous_map_tool = None
         self._adjusting_results_columns = False
+        self._adjusting_download_columns = False
+        self._saved_presets = []
+        self._recent_searches = []
+        self._last_download_granules = []
+        self._last_download_output_dir = ""
+        self._last_download_rows = []
 
         # Workers
         self._catalog_worker = None
@@ -773,7 +902,7 @@ class EarthdataDockWidget(QDockWidget):
         layout.addLayout(header_layout)
 
         # Search section
-        search_group = QGroupBox("Search Parameters")
+        search_group = QGroupBox()
         search_layout = QFormLayout(search_group)
         search_layout.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
@@ -812,7 +941,9 @@ class EarthdataDockWidget(QDockWidget):
         # Max items
         self.max_items_spin = QSpinBox()
         self.max_items_spin.setRange(1, 500)
-        self.max_items_spin.setValue(50)
+        self.max_items_spin.setValue(
+            self.settings.value("NASAEarthdata/default_max_items", 50, type=int)
+        )
         search_layout.addRow("Max Items:", self.max_items_spin)
 
         # Bounding box
@@ -853,7 +984,37 @@ class EarthdataDockWidget(QDockWidget):
         date_layout.addWidget(self.end_date)
         search_layout.addRow("Date Range:", date_layout)
 
-        layout.addWidget(search_group)
+        # Saved and recent searches
+        preset_layout = QHBoxLayout()
+        self.preset_combo = QComboBox()
+        self.preset_combo.setToolTip("Saved search presets")
+        preset_layout.addWidget(self.preset_combo, 1)
+        self.load_preset_btn = QPushButton("Load")
+        self.load_preset_btn.clicked.connect(self._load_selected_preset)
+        preset_layout.addWidget(self.load_preset_btn)
+        self.save_preset_btn = QPushButton("Save")
+        self.save_preset_btn.clicked.connect(self._save_current_preset)
+        preset_layout.addWidget(self.save_preset_btn)
+        self.delete_preset_btn = QPushButton("Delete")
+        self.delete_preset_btn.clicked.connect(self._delete_selected_preset)
+        preset_layout.addWidget(self.delete_preset_btn)
+        search_layout.addRow("Preset:", preset_layout)
+
+        recent_layout = QHBoxLayout()
+        self.recent_combo = QComboBox()
+        self.recent_combo.setToolTip("Recent search parameters")
+        recent_layout.addWidget(self.recent_combo, 1)
+        self.load_recent_btn = QPushButton("Load")
+        self.load_recent_btn.clicked.connect(self._load_selected_recent)
+        recent_layout.addWidget(self.load_recent_btn)
+        self.delete_recent_btn = QPushButton("Delete")
+        self.delete_recent_btn.clicked.connect(self._delete_selected_recent)
+        recent_layout.addWidget(self.delete_recent_btn)
+        search_layout.addRow("Recent:", recent_layout)
+
+        self.search_section_check = self._add_collapsible_section(
+            layout, "Search Parameters", search_group, checked=True
+        )
 
         # Advanced Options (collapsible checkbox)
         self.advanced_check = QCheckBox("Advanced Options")
@@ -974,7 +1135,7 @@ class EarthdataDockWidget(QDockWidget):
         layout.addWidget(self.progress_bar)
 
         # Results section
-        results_group = QGroupBox("Search Results")
+        results_group = QGroupBox()
         results_layout = QVBoxLayout(results_group)
 
         # Results table
@@ -1009,6 +1170,19 @@ class EarthdataDockWidget(QDockWidget):
             self._on_header_double_clicked
         )
         results_layout.addWidget(self.results_table)
+
+        # Selected granule detail inspector
+        details_group = QGroupBox()
+        details_layout = QVBoxLayout(details_group)
+        self.details_text = QTextEdit()
+        self.details_text.setReadOnly(True)
+        self.details_text.setMinimumHeight(90)
+        self.details_text.setMaximumHeight(160)
+        self.details_text.setPlaceholderText("Select a result to inspect metadata...")
+        details_layout.addWidget(self.details_text)
+        self.details_section_check = self._add_collapsible_section(
+            results_layout, "Granule Details", details_group, checked=False
+        )
 
         # COG file selection controls
         cog_mode_layout = QHBoxLayout()
@@ -1062,6 +1236,14 @@ class EarthdataDockWidget(QDockWidget):
         self.zoom_footprints_btn.setEnabled(False)
         self.zoom_footprints_btn.clicked.connect(self._zoom_to_footprints)
         info_layout.addWidget(self.zoom_footprints_btn)
+        self.export_csv_btn = QPushButton("Export CSV")
+        self.export_csv_btn.setEnabled(False)
+        self.export_csv_btn.clicked.connect(self._export_results_csv)
+        info_layout.addWidget(self.export_csv_btn)
+        self.export_geojson_btn = QPushButton("Export GeoJSON")
+        self.export_geojson_btn.setEnabled(False)
+        self.export_geojson_btn.clicked.connect(self._export_results_geojson)
+        info_layout.addWidget(self.export_geojson_btn)
         info_layout.addStretch()
         results_layout.addLayout(info_layout)
 
@@ -1070,10 +1252,12 @@ class EarthdataDockWidget(QDockWidget):
         self.results_label.setStyleSheet("color: gray;")
         results_layout.addWidget(self.results_label)
 
-        layout.addWidget(results_group)
+        self.results_section_check = self._add_collapsible_section(
+            layout, "Search Results", results_group, checked=True
+        )
 
         # Output section
-        output_group = QGroupBox("Output")
+        output_group = QGroupBox()
         output_layout = QVBoxLayout(output_group)
         output_layout.setContentsMargins(6, 6, 6, 6)
         output_group.setSizePolicy(
@@ -1089,19 +1273,81 @@ class EarthdataDockWidget(QDockWidget):
         self.output_text.setPlaceholderText("Status messages will appear here...")
         output_layout.addWidget(self.output_text)
 
-        layout.addWidget(output_group, 1)
+        self.output_section_check = self._add_collapsible_section(
+            layout, "Output", output_group, checked=True, stretch=1
+        )
+
+        # Download queue section
+        download_group = QGroupBox()
+        download_layout = QVBoxLayout(download_group)
+        self.download_queue_table = QTableWidget()
+        self.download_queue_table.setColumnCount(4)
+        self.download_queue_table.setHorizontalHeaderLabels(
+            ["Granule", "Status", "Message", "Files"]
+        )
+        download_header = self.download_queue_table.horizontalHeader()
+        download_header.setSectionsClickable(True)
+        download_header.setSectionsMovable(False)
+        download_header.setMinimumSectionSize(45)
+        download_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        download_header.setStretchLastSection(False)
+        download_header.sectionResized.connect(self._on_download_section_resized)
+        self._set_default_download_column_widths()
+        self.download_queue_table.installEventFilter(self)
+        self.download_queue_table.viewport().installEventFilter(self)
+        self.download_queue_table.setMinimumHeight(90)
+        download_layout.addWidget(self.download_queue_table)
+        download_btn_layout = QHBoxLayout()
+        self.cancel_download_btn = QPushButton("Cancel Download")
+        self.cancel_download_btn.setEnabled(False)
+        self.cancel_download_btn.clicked.connect(self._cancel_download)
+        download_btn_layout.addWidget(self.cancel_download_btn)
+        self.retry_failed_btn = QPushButton("Retry Failed")
+        self.retry_failed_btn.setEnabled(False)
+        self.retry_failed_btn.clicked.connect(self._retry_failed_downloads)
+        download_btn_layout.addWidget(self.retry_failed_btn)
+        download_btn_layout.addStretch()
+        download_layout.addLayout(download_btn_layout)
+        self.download_section_check = self._add_collapsible_section(
+            layout, "Download Queue", download_group, checked=False
+        )
 
         # Status label
         self.status_label = QLabel("Ready")
         self.status_label.setStyleSheet("color: gray; font-size: 10px;")
         layout.addWidget(self.status_label)
 
+        self._load_presets_into_combo()
+        self._load_recent_into_combo()
+
+    def _add_collapsible_section(self, layout, title, widget, checked=True, stretch=0):
+        """Add a checkbox-controlled section to a layout."""
+        checkbox = QCheckBox(title)
+        checkbox.setChecked(checked)
+        checkbox.toggled.connect(widget.setVisible)
+        layout.addWidget(checkbox)
+        widget.setVisible(checked)
+        if stretch:
+            layout.addWidget(widget, stretch)
+        else:
+            layout.addWidget(widget)
+        return checkbox
+
     def _load_datasets(self):
         """Load NASA datasets from cache or download."""
         self._log("Loading NASA Earthdata catalog...")
         self.refresh_catalog_btn.setEnabled(False)
 
-        self._catalog_worker = CatalogLoadWorker(force_refresh=False)
+        self._catalog_worker = CatalogLoadWorker(
+            force_refresh=False,
+            catalog_url=self.settings.value(
+                "NASAEarthdata/catalog_url", NASA_DATA_URL, type=str
+            ),
+            cache_dir=self.settings.value("NASAEarthdata/cache_dir", "", type=str),
+            cache_enabled=self.settings.value(
+                "NASAEarthdata/enable_cache", True, type=bool
+            ),
+        )
         self._catalog_worker.finished.connect(self._on_catalog_loaded)
         self._catalog_worker.error.connect(self._on_catalog_error)
         self._catalog_worker.progress.connect(self._log)
@@ -1112,7 +1358,16 @@ class EarthdataDockWidget(QDockWidget):
         self._log("Refreshing catalog from server...")
         self.refresh_catalog_btn.setEnabled(False)
 
-        self._catalog_worker = CatalogLoadWorker(force_refresh=True)
+        self._catalog_worker = CatalogLoadWorker(
+            force_refresh=True,
+            catalog_url=self.settings.value(
+                "NASAEarthdata/catalog_url", NASA_DATA_URL, type=str
+            ),
+            cache_dir=self.settings.value("NASAEarthdata/cache_dir", "", type=str),
+            cache_enabled=self.settings.value(
+                "NASAEarthdata/enable_cache", True, type=bool
+            ),
+        )
         self._catalog_worker.finished.connect(self._on_catalog_loaded)
         self._catalog_worker.error.connect(self._on_catalog_error)
         self._catalog_worker.progress.connect(self._log)
@@ -1121,6 +1376,192 @@ class EarthdataDockWidget(QDockWidget):
     def reload_catalog(self):
         """Reload the catalog, e.g. after dependencies are installed."""
         self._load_datasets()
+
+    def _presets_file(self):
+        """Return saved-search preset storage path."""
+        return workflow_dir(self.settings) / "search_presets.json"
+
+    def _load_presets_into_combo(self):
+        """Load saved search presets into the combo box."""
+        try:
+            self._saved_presets = load_search_presets(self._presets_file())
+        except Exception as e:
+            self._saved_presets = []
+            self._log(f"Could not load saved searches: {e}", error=True)
+
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        for preset in self._saved_presets:
+            self.preset_combo.addItem(preset.get("name", "Unnamed Search"), preset)
+        self.preset_combo.blockSignals(False)
+        self.load_preset_btn.setEnabled(bool(self._saved_presets))
+        self.delete_preset_btn.setEnabled(bool(self._saved_presets))
+
+    def _load_recent_into_combo(self):
+        """Load recent searches into the combo box."""
+        self._recent_searches = load_recent_searches(self.settings)
+        self.recent_combo.blockSignals(True)
+        self.recent_combo.clear()
+        for preset in self._recent_searches:
+            dataset = preset.get("dataset", {})
+            temporal = preset.get("temporal", {})
+            label = (
+                f"{dataset.get('short_name') or dataset.get('label', 'Dataset')} "
+                f"{temporal.get('start', '')} to {temporal.get('end', '')}"
+            ).strip()
+            self.recent_combo.addItem(label, preset)
+        self.recent_combo.blockSignals(False)
+        self.load_recent_btn.setEnabled(bool(self._recent_searches))
+        self.delete_recent_btn.setEnabled(bool(self._recent_searches))
+
+    def _current_advanced_options(self):
+        """Return current advanced search UI options."""
+        return {
+            "enabled": self.advanced_check.isChecked(),
+            "cloud_min": self.cloud_min_spin.value(),
+            "cloud_max": self.cloud_max_spin.value(),
+            "day_night": self.daynight_combo.currentData(),
+            "provider": self.provider_input.text().strip(),
+            "version": self.version_input.text().strip(),
+            "granule_id": self.granule_id_input.text().strip(),
+            "orbit_min": self.orbit_min_spin.value(),
+            "orbit_max": self.orbit_max_spin.value(),
+        }
+
+    def _current_search_preset(self, name):
+        """Build a search preset from current UI state."""
+        return build_search_preset(
+            name=name,
+            dataset_item=self.dataset_combo.currentData() or {},
+            bbox_text=self.bbox_input.text().strip(),
+            start_date=self.start_date.date().toString("yyyy-MM-dd"),
+            end_date=self.end_date.date().toString("yyyy-MM-dd"),
+            max_items=self.max_items_spin.value(),
+            advanced_options=self._current_advanced_options(),
+        )
+
+    def _save_current_preset(self):
+        """Prompt for a name and save the current search as a preset."""
+        default_name = self.dataset_combo.currentText() or "NASA Earthdata Search"
+        name, ok = QInputDialog.getText(
+            self,
+            "Save Search Preset",
+            "Preset name:",
+            text=default_name,
+        )
+        name = name.strip()
+        if not ok or not name:
+            return
+
+        try:
+            upsert_search_preset(
+                self._presets_file(), self._current_search_preset(name)
+            )
+            self._load_presets_into_combo()
+            self._log(f"Saved search preset: {name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Search Preset", f"Failed to save:\n{e}")
+
+    def _delete_selected_preset(self):
+        """Delete the selected saved search preset."""
+        index = self.preset_combo.currentIndex()
+        preset = self.preset_combo.currentData()
+        if index < 0 or not preset:
+            return
+
+        name = preset.get("name", self.preset_combo.currentText())
+        reply = QMessageBox.question(
+            self,
+            "Delete Search Preset",
+            f"Delete saved search preset '{name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            delete_search_preset(self._presets_file(), name)
+            self._load_presets_into_combo()
+            self._log(f"Deleted search preset: {name}")
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Delete Search Preset", f"Failed to delete:\n{e}"
+            )
+
+    def _delete_selected_recent(self):
+        """Delete the selected recent search."""
+        index = self.recent_combo.currentIndex()
+        if index < 0:
+            return
+
+        delete_recent_search(self.settings, index)
+        self._load_recent_into_combo()
+        self._log("Deleted recent search")
+
+    def _select_dataset_from_preset(self, preset):
+        """Select the dataset matching a preset."""
+        dataset = preset.get("dataset", {})
+        concept_id = dataset.get("concept_id", "")
+        short_name = dataset.get("short_name", "")
+        for index in range(self.dataset_combo.count()):
+            item = self.dataset_combo.itemData(index) or {}
+            if concept_id and item.get("concept_id") == concept_id:
+                self.dataset_combo.setCurrentIndex(index)
+                return
+            if short_name and item.get("short_name") == short_name:
+                self.dataset_combo.setCurrentIndex(index)
+                return
+
+    def _apply_search_preset(self, preset):
+        """Apply a search preset to the dock controls."""
+        if not preset:
+            return
+        self._select_dataset_from_preset(preset)
+        self.bbox_input.setText(preset.get("bbox", ""))
+        temporal = preset.get("temporal", {})
+        start = QDate.fromString(temporal.get("start", ""), "yyyy-MM-dd")
+        end = QDate.fromString(temporal.get("end", ""), "yyyy-MM-dd")
+        if start.isValid():
+            self.start_date.setDate(start)
+        if end.isValid():
+            self.end_date.setDate(end)
+        self.max_items_spin.setValue(int(preset.get("max_items", 50) or 50))
+
+        advanced = preset.get("advanced", {})
+        self.advanced_check.setChecked(bool(advanced.get("enabled", False)))
+        self.cloud_min_spin.setValue(int(advanced.get("cloud_min", 0) or 0))
+        self.cloud_max_spin.setValue(int(advanced.get("cloud_max", 100) or 100))
+        day_night = advanced.get("day_night")
+        for index in range(self.daynight_combo.count()):
+            if self.daynight_combo.itemData(index) == day_night:
+                self.daynight_combo.setCurrentIndex(index)
+                break
+        self.provider_input.setText(advanced.get("provider", "") or "")
+        self.version_input.setText(advanced.get("version", "") or "")
+        self.granule_id_input.setText(advanced.get("granule_id", "") or "")
+        self.orbit_min_spin.setValue(int(advanced.get("orbit_min", 0) or 0))
+        self.orbit_max_spin.setValue(int(advanced.get("orbit_max", 0) or 0))
+        self._log(f"Loaded search preset: {preset.get('name', 'recent search')}")
+
+    def _load_selected_preset(self):
+        """Load the selected saved search preset."""
+        self._apply_search_preset(self.preset_combo.currentData())
+
+    def _load_selected_recent(self):
+        """Load the selected recent search."""
+        self._apply_search_preset(self.recent_combo.currentData())
+
+    def _record_recent_search(self):
+        """Record current search parameters in the recent-search list."""
+        try:
+            record_recent_search(
+                self.settings,
+                self._current_search_preset("Recent Search"),
+            )
+            self._load_recent_into_combo()
+        except Exception as e:
+            self._log(f"Could not record recent search: {e}", error=True)
 
     def _populate_dataset_combo(self, items):
         """Populate dataset combo while preserving row metadata as item data."""
@@ -1132,17 +1573,19 @@ class EarthdataDockWidget(QDockWidget):
         self._on_dataset_changed(self.dataset_combo.currentIndex())
 
     def _select_default_dataset(self):
-        """Select the default HLSL30 collection, preferring the newer duplicate."""
-        hlsl30_indices = [
-            index
-            for index in range(self.dataset_combo.count())
-            if (self.dataset_combo.itemData(index) or {}).get("short_name") == "HLSL30"
-        ]
-        if hlsl30_indices:
-            default_index = (
-                hlsl30_indices[1] if len(hlsl30_indices) > 1 else hlsl30_indices[0]
-            )
-            self.dataset_combo.setCurrentIndex(default_index)
+        """Select the default HLSL30 collection by concept ID."""
+        default_concept_id = "C2021957657-LPCLOUD"
+        fallback_index = -1
+        for index in range(self.dataset_combo.count()):
+            item = self.dataset_combo.itemData(index) or {}
+            if item.get("concept_id") == default_concept_id:
+                self.dataset_combo.setCurrentIndex(index)
+                return
+            if fallback_index < 0 and item.get("short_name") == "HLSL30":
+                fallback_index = index
+
+        if fallback_index >= 0:
+            self.dataset_combo.setCurrentIndex(fallback_index)
 
     def _on_catalog_loaded(self, df, items):
         """Handle catalog loaded."""
@@ -1228,6 +1671,9 @@ class EarthdataDockWidget(QDockWidget):
         self.display_btn.setEnabled(False)
         self.download_btn.setEnabled(False)
         self.zoom_footprints_btn.setEnabled(False)
+        self.export_csv_btn.setEnabled(False)
+        self.export_geojson_btn.setEnabled(False)
+        self.details_text.clear()
         self.cog_list.clear()
         self.cog_list.setEnabled(False)
         self.cog_mode_combo.setEnabled(False)
@@ -1492,6 +1938,7 @@ class EarthdataDockWidget(QDockWidget):
             self._log(f"Searching {dataset_label} by concept-id...")
         else:
             self._log(f"Searching {short_name}...")
+        self._record_recent_search()
 
         # Start search worker
         self._search_worker = DataSearchWorker(
@@ -1507,6 +1954,8 @@ class EarthdataDockWidget(QDockWidget):
             granule_id=granule_id,
             orbit_number=orbit_number,
         )
+        if self.settings.value("NASAEarthdata/debug", False, type=bool):
+            self._log(f"Search kwargs: {self._search_worker._build_search_kwargs()}")
         self._search_worker.finished.connect(self._on_search_finished)
         self._search_worker.error.connect(self._on_search_error)
         self._search_worker.progress.connect(self._log)
@@ -1622,6 +2071,9 @@ class EarthdataDockWidget(QDockWidget):
         self.display_btn.setEnabled(True)
         self.download_btn.setEnabled(True)
         self.zoom_footprints_btn.setEnabled(True)
+        self.export_csv_btn.setEnabled(True)
+        self.export_geojson_btn.setEnabled(True)
+        self._update_granule_details()
 
     def _on_search_error(self, error_msg):
         """Handle search error."""
@@ -1712,8 +2164,9 @@ class EarthdataDockWidget(QDockWidget):
                 QgsProject.instance().addMapLayer(layer)
                 self._footprints_layer = layer
 
-                # Zoom to footprints with proper CRS handling
-                self._zoom_to_footprints()
+                if self.settings.value("NASAEarthdata/auto_zoom", True, type=bool):
+                    # Zoom to footprints with proper CRS handling
+                    self._zoom_to_footprints()
 
                 self._log("Footprints added to map")
             else:
@@ -1910,6 +2363,7 @@ class EarthdataDockWidget(QDockWidget):
             self._clear_rgb_channel_combos()
 
         self._sync_footprint_selection_from_table()
+        self._update_granule_details()
 
     def _get_result_index_for_table_row(self, table_row):
         """Map current table row (after sorting) to original search result index."""
@@ -1942,6 +2396,108 @@ class EarthdataDockWidget(QDockWidget):
 
         # Preserve order while removing duplicates.
         return list(dict.fromkeys(indices))
+
+    def _first_selected_result_index(self):
+        """Return the first selected result index, if any."""
+        selected = self._get_selected_result_indices()
+        if selected:
+            return selected[0]
+        current_row = self.results_table.currentRow()
+        if current_row >= 0:
+            return self._get_result_index_for_table_row(current_row)
+        return -1
+
+    def _update_granule_details(self):
+        """Update the selected-granule detail inspector."""
+        if not self._search_results:
+            self.details_text.clear()
+            return
+
+        result_index = self._first_selected_result_index()
+        if result_index < 0 or result_index >= len(self._search_results):
+            self.details_text.setPlainText("Select a result to inspect metadata.")
+            return
+
+        granule = self._search_results[result_index]
+        dataset_item = self.dataset_combo.currentData() or {}
+        row = granule_export_row(granule, result_index, dataset_item)
+        links = granule_links(granule)
+        cog_links = cog_links_from_links(links)
+        lines = [
+            f"Native ID: {row.get('native_id', '')}",
+            f"Dataset: {row.get('dataset_short_name', '')}",
+            f"Concept ID: {row.get('dataset_concept_id', '')}",
+            f"Provider: {row.get('provider') or row.get('dataset_provider', '')}",
+            f"Version: {row.get('dataset_version', '')}",
+            f"Temporal Start: {row.get('temporal_start', '')}",
+            f"Temporal End: {row.get('temporal_end', '')}",
+            f"Size: {row.get('size_display', '')}",
+            f"COG/TIFF Links: {len(cog_links)}",
+            "",
+            "Links:",
+        ]
+        lines.extend(links or ["No links available"])
+        self.details_text.setPlainText("\n".join(str(line) for line in lines))
+
+    def _export_rows(self):
+        """Return export rows for all current results."""
+        return granules_to_export_rows(
+            self._search_results or [], self.dataset_combo.currentData() or {}
+        )
+
+    def _export_results_csv(self):
+        """Export current result metadata to CSV."""
+        if not self._search_results:
+            QMessageBox.information(
+                self, "Export Results", "No search results to export."
+            )
+            return
+
+        default_path = str(workflow_dir(self.settings) / "earthdata_results.csv")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export NASA Earthdata Results CSV",
+            default_path,
+            "CSV Files (*.csv)",
+        )
+        if not file_path:
+            return
+
+        try:
+            write_results_csv(file_path, self._export_rows())
+            self._log(f"Exported result metadata: {file_path}")
+            self._notify_success("NASA Earthdata", "Exported result metadata to CSV")
+        except Exception as e:
+            QMessageBox.critical(self, "Export CSV", f"Failed to export:\n{e}")
+
+    def _export_results_geojson(self):
+        """Export current result footprints and metadata to GeoJSON."""
+        if not self._search_results:
+            QMessageBox.information(
+                self, "Export Results", "No search results to export."
+            )
+            return
+
+        default_path = str(workflow_dir(self.settings) / "earthdata_results.geojson")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export NASA Earthdata Results GeoJSON",
+            default_path,
+            "GeoJSON Files (*.geojson *.json)",
+        )
+        if not file_path:
+            return
+
+        try:
+            write_results_geojson(file_path, self._export_rows(), self._search_gdf)
+            layer = QgsVectorLayer(file_path, "NASA Earthdata Exported Results", "ogr")
+            if layer.isValid():
+                layer.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
+                QgsProject.instance().addMapLayer(layer)
+            self._log(f"Exported result footprints: {file_path}")
+            self._notify_success("NASA Earthdata", "Exported result footprints")
+        except Exception as e:
+            QMessageBox.critical(self, "Export GeoJSON", f"Failed to export:\n{e}")
 
     def _sync_footprint_selection_from_table(self):
         """Highlight footprint features matching selected table rows."""
@@ -2043,14 +2599,66 @@ class EarthdataDockWidget(QDockWidget):
         if logical_index in (1, 2) and not self._adjusting_results_columns:
             QTimer.singleShot(0, self._fit_results_columns_to_width)
 
+    def _set_default_download_column_widths(self):
+        """Set initial queue column widths and make Granule fill remaining space."""
+        if self._adjusting_download_columns:
+            return
+
+        self._adjusting_download_columns = True
+        try:
+            self.download_queue_table.setColumnWidth(1, 80)
+            self.download_queue_table.setColumnWidth(2, 130)
+            self.download_queue_table.setColumnWidth(3, 90)
+        finally:
+            self._adjusting_download_columns = False
+
+        self._fit_download_columns_to_width()
+
+    def _fit_download_columns_to_width(self):
+        """Make the Granule column fill leftover queue table width."""
+        if self._adjusting_download_columns:
+            return
+
+        viewport_width = self.download_queue_table.viewport().width()
+        if viewport_width <= 0:
+            viewport_width = self.download_queue_table.width()
+        if viewport_width <= 0:
+            return
+
+        header = self.download_queue_table.horizontalHeader()
+        min_width = max(45, header.minimumSectionSize())
+        status_width = max(min_width, self.download_queue_table.columnWidth(1) or 80)
+        message_width = max(min_width, self.download_queue_table.columnWidth(2) or 130)
+        files_width = max(min_width, self.download_queue_table.columnWidth(3) or 90)
+        granule_width = max(
+            180, viewport_width - status_width - message_width - files_width
+        )
+
+        self._adjusting_download_columns = True
+        try:
+            self.download_queue_table.setColumnWidth(0, granule_width)
+        finally:
+            self._adjusting_download_columns = False
+
+    def _on_download_section_resized(self, logical_index, _old_size, _new_size):
+        """Keep Granule as the fill column when queue detail columns resize."""
+        if logical_index in (1, 2, 3) and not self._adjusting_download_columns:
+            QTimer.singleShot(0, self._fit_download_columns_to_width)
+
     def eventFilter(self, obj, event):
-        """Keep results columns fitted when the table viewport changes size."""
+        """Keep table columns fitted when viewports change size."""
         if (
             hasattr(self, "results_table")
             and obj in (self.results_table, self.results_table.viewport())
             and event.type() == QEvent.Type.Resize
         ):
             QTimer.singleShot(0, self._fit_results_columns_to_width)
+        if (
+            hasattr(self, "download_queue_table")
+            and obj in (self.download_queue_table, self.download_queue_table.viewport())
+            and event.type() == QEvent.Type.Resize
+        ):
+            QTimer.singleShot(0, self._fit_download_columns_to_width)
         return super().eventFilter(obj, event)
 
     def _sort_cog_links(self, cog_links):
@@ -2217,6 +2825,81 @@ class EarthdataDockWidget(QDockWidget):
             ]
         return self._search_results  # Return all if none selected
 
+    def _populate_download_queue(self, granules):
+        """Populate the download queue table."""
+        self.download_queue_table.setRowCount(len(granules or []))
+        for index, granule in enumerate(granules or []):
+            native_id = granule_native_id(granule, f"Item {index + 1}")
+            values = [native_id, "queued", "", ""]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
+                self.download_queue_table.setItem(index, column, item)
+        self._fit_download_columns_to_width()
+
+    def _on_download_queue_update(self, row, status, message, files):
+        """Update one download queue row."""
+        if row < 0 or row >= self.download_queue_table.rowCount():
+            return
+        values = {
+            1: status,
+            2: message,
+            3: "\n".join(str(file_path) for file_path in files),
+        }
+        for column, value in values.items():
+            item = self.download_queue_table.item(row, column)
+            if item is None:
+                item = QTableWidgetItem()
+                self.download_queue_table.setItem(row, column, item)
+            item.setText(str(value))
+            item.setToolTip(str(value))
+
+    def _cancel_download(self):
+        """Cancel the active download queue."""
+        if self._download_worker is not None and self._download_worker.isRunning():
+            self._download_worker.cancel()
+            self.cancel_download_btn.setEnabled(False)
+            self._log("Cancelling download queue after the current item...")
+
+    def _retry_failed_downloads(self):
+        """Retry failed download queue items in the previous output folder."""
+        if not self._last_download_output_dir:
+            return
+
+        failed_indices = [
+            int(row.get("index"))
+            for row in self._last_download_rows
+            if row.get("status") == "failed"
+        ]
+        granules = [
+            self._last_download_granules[index]
+            for index in failed_indices
+            if 0 <= index < len(self._last_download_granules)
+        ]
+        if not granules:
+            self.retry_failed_btn.setEnabled(False)
+            return
+
+        self.download_btn.setEnabled(False)
+        self.cancel_download_btn.setEnabled(True)
+        self.retry_failed_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 100)
+        self._populate_download_queue(granules)
+        self._log(f"Retrying {len(granules)} failed download(s)...")
+
+        self._download_worker = DataDownloadWorker(
+            granules,
+            self._last_download_output_dir,
+            threads=self.settings.value("NASAEarthdata/download_threads", 1, type=int),
+            skip_existing=True,
+        )
+        self._download_worker.finished.connect(self._on_download_finished)
+        self._download_worker.error.connect(self._on_download_error)
+        self._download_worker.progress.connect(self._on_download_progress)
+        self._download_worker.queue_update.connect(self._on_download_queue_update)
+        self._download_worker.start()
+
     def _display_cog(self):
         """Display selected COG layers using a worker thread."""
         display_mode = self.cog_mode_combo.currentData() or "single"
@@ -2376,7 +3059,7 @@ class EarthdataDockWidget(QDockWidget):
 
         if added_count > 0:
             self._log(f"Added {added_count} COG layer(s)")
-            self.iface.messageBar().pushSuccess(
+            self._notify_success(
                 "NASA Earthdata", f"Added {added_count} COG layer(s) to the map"
             )
         else:
@@ -2444,15 +3127,26 @@ class EarthdataDockWidget(QDockWidget):
 
         # Disable UI during download
         self.download_btn.setEnabled(False)
+        self.cancel_download_btn.setEnabled(True)
+        self.retry_failed_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 100)
         self._log(f"Downloading {len(granules)} granule(s) to {output_dir}...")
+        self._populate_download_queue(granules)
+        self._last_download_granules = list(granules)
+        self._last_download_output_dir = output_dir
 
         # Start download worker
-        self._download_worker = DataDownloadWorker(granules, output_dir)
+        self._download_worker = DataDownloadWorker(
+            granules,
+            output_dir,
+            threads=self.settings.value("NASAEarthdata/download_threads", 1, type=int),
+            skip_existing=True,
+        )
         self._download_worker.finished.connect(self._on_download_finished)
         self._download_worker.error.connect(self._on_download_error)
         self._download_worker.progress.connect(self._on_download_progress)
+        self._download_worker.queue_update.connect(self._on_download_queue_update)
         self._download_worker.start()
 
     def _on_download_progress(self, percent, message):
@@ -2460,12 +3154,18 @@ class EarthdataDockWidget(QDockWidget):
         self.progress_bar.setValue(percent)
         self._log(message)
 
-    def _on_download_finished(self, files):
+    def _on_download_finished(self, files, manifest, queue_rows):
         """Handle download completion."""
         self.download_btn.setEnabled(True)
+        self.cancel_download_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
+        self._last_download_rows = queue_rows
 
-        self._log(f"Download complete! {len(files)} file(s) downloaded.")
+        failed_count = len([row for row in queue_rows if row.get("status") == "failed"])
+        self.retry_failed_btn.setEnabled(failed_count > 0)
+        self._log(
+            f"Download complete! {len(files)} file(s) available. Manifest: {manifest}"
+        )
 
         # Offer to add downloaded files to map
         if files:
@@ -2488,10 +3188,12 @@ class EarthdataDockWidget(QDockWidget):
                         if layer.isValid():
                             QgsProject.instance().addMapLayer(layer)
                             self._log(f"Added: {layer_name}")
+        self._notify_success("NASA Earthdata", "Download queue complete")
 
     def _on_download_error(self, error_msg):
         """Handle download error."""
         self.download_btn.setEnabled(True)
+        self.cancel_download_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
         self._log(f"Download error: {error_msg}", error=True)
 
@@ -2550,6 +3252,15 @@ class EarthdataDockWidget(QDockWidget):
         else:
             self.status_label.setText(message[:50])
             self.status_label.setStyleSheet("color: gray; font-size: 10px;")
+
+    def _notify_success(self, title, message):
+        """Show a success notification when enabled."""
+        if not self.settings.value("NASAEarthdata/notifications", True, type=bool):
+            return
+        try:
+            self.iface.messageBar().pushSuccess(title, message)
+        except Exception:
+            pass  # nosec B110
 
     def closeEvent(self, event):
         """Handle dock widget close event."""

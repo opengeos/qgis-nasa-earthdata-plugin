@@ -25,7 +25,7 @@ about=NASA Earthdata Plugin for QGIS enables searching, visualizing, and downloa
 tracker=https://github.com/opengeos/qgis-nasa-earthdata-plugin/issues
 repository=https://github.com/opengeos/qgis-nasa-earthdata-plugin
 
-hasProcessingProvider=no
+hasProcessingProvider=yes
 
 tags=nasa, earthdata, satellite, remote sensing, COG, cloud optimized geotiff, download, visualization, GEDI, MODIS, Landsat
 
@@ -38,6 +38,7 @@ deprecated=False
 
 changelog=
     0.8.0
+        - Add saved searches, recent searches, result export, granule details, download queue, and Processing provider
         - Improve Earthdata search panel dataset selection, COG display, and layout
         - Add RGB COG channel selection and streamed COG visualization improvements
         - Add bounding box drawing tool and resizable/adaptive search result columns
