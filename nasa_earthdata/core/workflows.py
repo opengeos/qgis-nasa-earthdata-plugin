@@ -3,7 +3,7 @@
 import csv
 import json
 import os
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -358,13 +358,22 @@ def granule_related_urls(granule):
 
 
 def granule_quicklook_links(granule):
-    """Return likely browse/quicklook image URLs for a granule."""
+    """Return directly displayable browse/quicklook image URLs for a granule.
+
+    CMR entries can include matching ``s3://`` browse objects. Those are useful
+    for same-region cloud access but are not browser-displayable in QGIS, so do
+    not return them here.
+    """
     links = []
     for item in granule_related_urls(granule):
         url = str(item.get("URL", "")).strip()
         if not url:
             continue
         url_lower = url.lower()
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https"):
+            continue
+        path_lower = parsed.path.lower()
         type_text = " ".join(
             str(item.get(key, ""))
             for key in ("Type", "Subtype", "Description", "Format")
@@ -373,7 +382,36 @@ def granule_quicklook_links(granule):
             "browse" in type_text
             or "quicklook" in type_text
             or "thumbnail" in type_text
-            or any(url_lower.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif"))
+            or any(
+                path_lower.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif")
+            )
+        ):
+            links.append(url)
+    return list(dict.fromkeys(links))
+
+
+def granule_inaccessible_quicklook_links(granule):
+    """Return browse/quicklook URLs that are not directly displayable in QGIS."""
+    links = []
+    for item in granule_related_urls(granule):
+        url = str(item.get("URL", "")).strip()
+        if not url:
+            continue
+        parsed = urlsplit(url)
+        if parsed.scheme in ("http", "https"):
+            continue
+        path_lower = parsed.path.lower()
+        type_text = " ".join(
+            str(item.get(key, ""))
+            for key in ("Type", "Subtype", "Description", "Format")
+        ).lower()
+        if (
+            "browse" in type_text
+            or "quicklook" in type_text
+            or "thumbnail" in type_text
+            or any(
+                path_lower.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif")
+            )
         ):
             links.append(url)
     return list(dict.fromkeys(links))

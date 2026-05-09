@@ -8,6 +8,7 @@ and downloading NASA Earthdata products in QGIS.
 import os
 import json
 import html
+import hashlib
 import platform
 import tempfile
 import time
@@ -72,6 +73,7 @@ from ..core.workflows import (
     download_queue_state_path,
     granule_export_row,
     granule_citation_links,
+    granule_inaccessible_quicklook_links,
     granule_links,
     granule_native_id,
     granule_quicklook_links,
@@ -2829,6 +2831,7 @@ class EarthdataDockWidget(QDockWidget):
             granule = self._search_results[result_index]
             native_id = granule_native_id(granule, f"Item {result_index + 1}")
             quicklooks = granule_quicklook_links(granule)
+            inaccessible_quicklooks = granule_inaccessible_quicklook_links(granule)
             citations = granule_citation_links(granule)
             all_quicklooks.extend(quicklooks)
             all_citations.extend(citations)
@@ -2838,13 +2841,16 @@ class EarthdataDockWidget(QDockWidget):
             if quicklooks:
                 html_parts.append("<div>")
                 for url in quicklooks[:4]:
-                    escaped = html.escape(url, quote=True)
-                    html_parts.append(
-                        f'<a href="{escaped}"><img src="{escaped}" '
-                        'height="96" style="margin:4px;"/></a>'
-                    )
+                    image_html = self._quicklook_img_html(url, 96)
+                    if image_html:
+                        html_parts.append(image_html)
                 html_parts.append("</div>")
                 html_parts.append(self._link_list_html(quicklooks, ""))
+            elif inaccessible_quicklooks:
+                html_parts.append(
+                    "<p>Browse objects are available only as non-browser storage links "
+                    "and cannot be previewed here.</p>"
+                )
             else:
                 html_parts.append("<p>No quicklook links found.</p>")
             if citations:
@@ -2880,6 +2886,41 @@ class EarthdataDockWidget(QDockWidget):
             return f"<p>{html.escape(empty_text)}</p>"
         items = "".join(f"<li>{self._link_html(link)}</li>" for link in links)
         return f"<ul>{items}</ul>"
+
+    def _cached_quicklook_image_src(self, url):
+        """Download an HTTPS quicklook to cache and return a local image URI."""
+        url = str(url or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            return ""
+
+        suffix = Path(url.split("?", 1)[0]).suffix.lower()
+        if suffix not in (".jpg", ".jpeg", ".png", ".gif"):
+            suffix = ".jpg"
+
+        cache_dir = Path(tempfile.gettempdir()) / "nasa_earthdata_quicklooks"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+        image_path = cache_dir / f"{digest}{suffix}"
+        if not image_path.exists():
+            try:
+                with https_only_urlopen(url, timeout=20) as resp:
+                    image_path.write_bytes(resp.read())
+            except Exception as e:
+                self._log(f"Could not load quicklook thumbnail: {e}", error=True)
+                return ""
+        return image_path.as_uri()
+
+    def _quicklook_img_html(self, url, height):
+        """Return HTML for a cached quicklook image linked to its source URL."""
+        src = self._cached_quicklook_image_src(url)
+        if not src:
+            return ""
+        escaped_url = html.escape(url, quote=True)
+        escaped_src = html.escape(src, quote=True)
+        return (
+            f'<a href="{escaped_url}"><img src="{escaped_src}" '
+            f'height="{int(height)}" style="margin:4px;"/></a>'
+        )
 
     def _open_selected_quicklook(self):
         """Open the first available quicklook link across selected granules."""
@@ -2918,11 +2959,10 @@ class EarthdataDockWidget(QDockWidget):
                 f"<h4>{html.escape(str(native_id))}</h4>"
             )
             for url in quicklooks[:6]:
-                escaped = html.escape(url, quote=True)
-                html_parts.append(
-                    f'<a href="{escaped}"><img src="{escaped}" '
-                    'height="180" style="margin:6px;"/></a>'
-                )
+                image_html = self._quicklook_img_html(url, 180)
+                if image_html:
+                    html_parts.append(image_html)
+            html_parts.append(self._link_list_html(quicklooks, ""))
             html_parts.append("</div>")
         html_parts.append("</body></html>")
         return "".join(html_parts)
