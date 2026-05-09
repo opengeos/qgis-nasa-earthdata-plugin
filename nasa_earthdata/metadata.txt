@@ -3,7 +3,7 @@ name=NASA Earthdata
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 description=Search, visualize, and download NASA Earthdata products in QGIS. Supports COG visualization and data footprint display.
-version=0.7.3
+version=0.8.0
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -37,6 +37,10 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.8.0
+        - Improve Earthdata search panel dataset selection, COG display, and layout
+        - Add RGB COG channel selection and streamed COG visualization improvements
+        - Add bounding box drawing tool and resizable/adaptive search result columns
     0.7.3
         - Remove bundled AI assistant panel
         - Route the AI Assistant button to OpenGeoAgent
