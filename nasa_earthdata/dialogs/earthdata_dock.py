@@ -10,10 +10,11 @@ import json
 import platform
 import tempfile
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
-from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal, QSettings, QDate
+from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal, QSettings, QDate, QEvent, QTimer
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QWidget,
@@ -38,8 +39,11 @@ from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QScrollArea,
+    QSizePolicy,
+    QListWidget,
+    QListWidgetItem,
 )
-from qgis.PyQt.QtGui import QFont, QCursor
+from qgis.PyQt.QtGui import QFont
 from qgis.core import (
     QgsProject,
     QgsVectorLayer,
@@ -81,6 +85,15 @@ class NumericTableWidgetItem(QTableWidgetItem):
             return super().__lt__(other)
 
 
+def _compact_result_id(value, prefix_chars=34, suffix_chars=18):
+    """Shorten long result IDs while preserving useful start and end tokens."""
+    text = str(value)
+    max_chars = prefix_chars + suffix_chars + 3
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:prefix_chars]}...{text[-suffix_chars:]}"
+
+
 class CatalogData:
     """Lightweight catalog data wrapper using stdlib only.
 
@@ -96,6 +109,64 @@ class CatalogData:
         """
         self._rows = rows
 
+    def _field_value(self, row, *names):
+        """Return the first non-empty value from possible catalog field names."""
+        for name in names:
+            value = row.get(name)
+            if value:
+                return str(value).strip()
+        return ""
+
+    def _item_for_row(self, row, duplicate_short_name=False):
+        short_name = self._field_value(row, "ShortName")
+        concept_id = self._field_value(row, "concept-id", "ConceptID", "concept_id")
+        provider = self._field_value(row, "provider-id", "Provider", "provider")
+        version = self._field_value(row, "Version")
+        title = self._field_value(row, "EntryTitle")
+
+        label = short_name
+        if duplicate_short_name:
+            details = []
+            if version:
+                details.append(f"v{version}")
+            if provider:
+                details.append(provider)
+            if concept_id:
+                details.append(concept_id)
+            if details:
+                label = f"{short_name} ({', '.join(details)})"
+
+        return {
+            "label": label,
+            "short_name": short_name,
+            "concept_id": concept_id,
+            "provider": provider,
+            "version": version,
+            "title": title,
+            "row": row,
+        }
+
+    def get_dataset_items(self):
+        """Return combo-box items that preserve collection identity.
+
+        ShortName is not unique in CMR. Duplicate ShortNames are disambiguated
+        in the visible label while the full row, including concept-id, is kept
+        in the item data.
+        """
+        counts = {}
+        for row in self._rows:
+            short_name = self._field_value(row, "ShortName")
+            counts[short_name] = counts.get(short_name, 0) + 1
+
+        return [
+            self._item_for_row(
+                row,
+                duplicate_short_name=counts.get(self._field_value(row, "ShortName"), 0)
+                > 1,
+            )
+            for row in self._rows
+        ]
+
     def get_short_names(self):
         """Return a list of all ShortName values.
 
@@ -105,20 +176,27 @@ class CatalogData:
         return [r.get("ShortName", "") for r in self._rows]
 
     def filter_by_keyword(self, keyword):
-        """Return ShortNames where keyword matches ShortName or EntryTitle.
+        """Return dataset items matching ShortName, title, or collection metadata.
 
         Args:
             keyword: Lowercase search string.
 
         Returns:
-            List of matching ShortName strings.
+            List of matching dataset item dictionaries.
         """
         result = []
-        for r in self._rows:
-            sn = r.get("ShortName", "")
-            et = r.get("EntryTitle", "")
-            if keyword in sn.lower() or keyword in et.lower():
-                result.append(sn)
+        for item in self.get_dataset_items():
+            haystack = " ".join(
+                [
+                    item.get("short_name", ""),
+                    item.get("title", ""),
+                    item.get("concept_id", ""),
+                    item.get("provider", ""),
+                    item.get("version", ""),
+                ]
+            ).lower()
+            if keyword in haystack:
+                result.append(item)
         return result
 
     def get_title(self, short_name):
@@ -180,8 +258,7 @@ class CatalogLoadWorker(QThread):
                 rows = list(reader)
 
             catalog = CatalogData(rows)
-            names = catalog.get_short_names()
-            self.finished.emit(catalog, names)
+            self.finished.emit(catalog, catalog.get_dataset_items())
 
         except Exception as e:
             self.error.emit(str(e))
@@ -197,6 +274,7 @@ class DataSearchWorker(QThread):
     def __init__(
         self,
         short_name,
+        concept_id,
         bbox,
         temporal,
         max_items,
@@ -210,6 +288,7 @@ class DataSearchWorker(QThread):
     ):
         super().__init__(parent)
         self.short_name = short_name
+        self.concept_id = concept_id
         self.bbox = bbox
         self.temporal = temporal
         self.max_items = max_items
@@ -220,6 +299,40 @@ class DataSearchWorker(QThread):
         self.granule_id = granule_id
         self.orbit_number = orbit_number
 
+    def _build_search_kwargs(self):
+        """Build earthaccess search kwargs for this request."""
+        if self.concept_id:
+            kwargs = {"concept_id": self.concept_id}
+        else:
+            kwargs = {"short_name": self.short_name}
+
+        if self.bbox is not None:
+            kwargs["bounding_box"] = self.bbox
+
+        if self.temporal is not None:
+            kwargs["temporal"] = self.temporal
+
+        # Advanced search options
+        if self.cloud_cover is not None:
+            kwargs["cloud_cover"] = self.cloud_cover
+
+        if self.day_night is not None:
+            kwargs["day_night_flag"] = self.day_night
+
+        if self.provider:
+            kwargs["provider"] = self.provider
+
+        if self.version:
+            kwargs["version"] = self.version
+
+        if self.granule_id:
+            kwargs["granule_ur"] = self.granule_id
+
+        if self.orbit_number is not None:
+            kwargs["orbit_number"] = self.orbit_number
+
+        return kwargs
+
     def run(self):
         """Execute the search."""
         try:
@@ -229,33 +342,7 @@ class DataSearchWorker(QThread):
             earthaccess = import_earthaccess()
 
             self.progress.emit("Searching NASA Earthdata...")
-
-            kwargs = {"short_name": self.short_name}
-
-            if self.bbox is not None:
-                kwargs["bounding_box"] = self.bbox
-
-            if self.temporal is not None:
-                kwargs["temporal"] = self.temporal
-
-            # Advanced search options
-            if self.cloud_cover is not None:
-                kwargs["cloud_cover"] = self.cloud_cover
-
-            if self.day_night is not None:
-                kwargs["day_night_flag"] = self.day_night
-
-            if self.provider:
-                kwargs["provider"] = self.provider
-
-            if self.version:
-                kwargs["version"] = self.version
-
-            if self.granule_id:
-                kwargs["granule_ur"] = self.granule_id
-
-            if self.orbit_number is not None:
-                kwargs["orbit_number"] = self.orbit_number
+            kwargs = self._build_search_kwargs()
 
             granules = earthaccess.search_data(count=self.max_items, **kwargs)
 
@@ -322,21 +409,22 @@ class DataSearchWorker(QThread):
 
 
 class COGDisplayWorker(QThread):
-    """Worker thread for downloading and displaying COG layers.
+    """Worker thread for preparing streamed COG layers.
 
-    Downloads COG files via the earthaccess authenticated session to a temp
-    directory, then emits the local file paths for QGIS to load. This avoids
-    GDAL /vsicurl/ authentication issues with NASA's URS redirect flow.
+    Authenticates with earthaccess, primes a requests session for NASA's
+    redirect flow, writes a GDAL-readable cookie jar, and emits /vsicurl/
+    sources for QGIS to stream directly.
     """
 
-    finished = pyqtSignal(list)  # list of (layer_name, local_path) tuples
+    finished = pyqtSignal(list, object)  # results, cookie_file
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
     def __init__(
         self,
         granules,
-        selected_cog_url=None,
+        selected_cog_urls=None,
+        display_mode="single",
         username=None,
         password=None,
         parent=None,
@@ -345,14 +433,17 @@ class COGDisplayWorker(QThread):
 
         Args:
             granules: List of earthaccess granule objects.
-            selected_cog_url: Specific COG URL if provided.
+            selected_cog_urls: Specific COG URLs if provided.
+            display_mode: "single" for individual layers, "rgb" for a VRT
+                composite built from three selected single-band COGs.
             username: Earthdata username from Settings input box.
             password: Earthdata password from Settings input box.
             parent: Parent QObject.
         """
         super().__init__(parent)
         self.granules = granules
-        self.selected_cog_url = selected_cog_url
+        self.selected_cog_urls = selected_cog_urls or []
+        self.display_mode = display_mode
         self.username = (username or "").strip()
         self.password = (password or "").strip()
 
@@ -391,8 +482,138 @@ class COGDisplayWorker(QThread):
 
         return False
 
+    def _collect_cog_urls(self):
+        """Collect COG/TIFF URLs from explicit selection or granule links."""
+        if self.selected_cog_urls:
+            return list(dict.fromkeys(self.selected_cog_urls))
+
+        cog_urls = []
+        for granule in self.granules:
+            try:
+                try:
+                    links = granule.data_links(access="external")
+                except TypeError:
+                    links = granule.data_links()
+
+                for link in links:
+                    if any(ext in link.lower() for ext in [".tif", ".tiff"]) and (
+                        link.startswith("http")
+                    ):
+                        cog_urls.append(link)
+                        name = os.path.basename(link).split("?")[0]
+                        self.progress.emit(f"Found: {name}")
+                        break  # first TIFF per granule for the default path
+            except Exception as e:
+                self.progress.emit(f"Error processing granule: {e}")
+
+        return cog_urls
+
+    def _prime_session(self, session, url):
+        """Follow auth redirects without downloading the COG body."""
+        try:
+            with session.get(url, stream=True, timeout=60) as resp:
+                resp.raise_for_status()
+        except Exception as e:
+            self.progress.emit(f"Warning: could not preflight COG URL: {e}")
+
+    def _write_cookie_file(self, session):
+        """Write requests cookies in Netscape format for GDAL /vsicurl/."""
+        cookie_file = os.path.join(
+            tempfile.gettempdir(), f"nasa_earthdata_gdal_{uuid.uuid4().hex}.cookies"
+        )
+        with open(cookie_file, "w", encoding="utf-8") as f:
+            f.write("# Netscape HTTP Cookie File\n")
+            for cookie in session.cookies:
+                domain = cookie.domain or ""
+                include_subdomains = "TRUE" if domain.startswith(".") else "FALSE"
+                path = cookie.path or "/"
+                secure = "TRUE" if cookie.secure else "FALSE"
+                expires = str(cookie.expires or 0)
+                f.write(
+                    "\t".join(
+                        [
+                            domain,
+                            include_subdomains,
+                            path,
+                            secure,
+                            expires,
+                            str(cookie.name),
+                            str(cookie.value),
+                        ]
+                    )
+                    + "\n"
+                )
+        return cookie_file
+
+    def _configure_gdal_streaming(self, gdal, cookie_file):
+        """Configure GDAL for authenticated /vsicurl/ COG reads."""
+        if cookie_file:
+            gdal.SetConfigOption("GDAL_HTTP_COOKIEFILE", cookie_file)
+            gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", cookie_file)
+        netrc_path = os.path.expanduser("~/.netrc")
+        if os.path.exists(netrc_path):
+            gdal.SetConfigOption("GDAL_HTTP_NETRC", "YES")
+            gdal.SetConfigOption("GDAL_HTTP_NETRC_FILE", netrc_path)
+        gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+        gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF")
+        gdal.SetConfigOption("GDAL_HTTP_UNSAFESSL", "YES")
+        gdal.SetConfigOption("GDAL_HTTP_MAX_RETRY", "3")
+        gdal.SetConfigOption("VSI_CACHE", "TRUE")
+        gdal.SetConfigOption("VSI_CACHE_SIZE", "100000000")  # 100MB cache
+
+    def _create_rgb_vrt(self, layer_name, sources, gdal):
+        """Create a small local VRT that references three streamed COG sources."""
+        if len(sources) != 3:
+            return None
+
+        vrt_id = uuid.uuid4().hex
+        vrt_path = os.path.join(
+            tempfile.gettempdir(),
+            f"nasa_earthdata_{vrt_id}_rgb.vrt",
+        )
+        vsimem_vrt_path = f"/vsimem/nasa_earthdata_{vrt_id}_rgb.vrt"
+        try:
+            vrt = gdal.BuildVRT(
+                vsimem_vrt_path,
+                sources,
+                options=gdal.BuildVRTOptions(separate=True),
+            )
+            if vrt is None:
+                return None
+
+            for band_index, color_interp in enumerate(
+                (gdal.GCI_RedBand, gdal.GCI_GreenBand, gdal.GCI_BlueBand),
+                start=1,
+            ):
+                band = vrt.GetRasterBand(band_index)
+                if band is not None:
+                    band.SetColorInterpretation(color_interp)
+
+            vrt.FlushCache()
+            vrt_xml = vrt.GetMetadata("xml:VRT")
+            if vrt_xml:
+                with open(vrt_path, "w", encoding="utf-8") as f:
+                    f.write(vrt_xml[0])
+            else:
+                translated = gdal.Translate(vrt_path, vrt, format="VRT")
+                if translated is not None:
+                    translated = None
+            vrt = None
+
+            if not os.path.exists(vrt_path):
+                self.progress.emit("RGB VRT was not written to disk")
+                return None
+
+            self.progress.emit(f"Built RGB VRT: {vrt_path}")
+            return vrt_path
+        finally:
+            try:
+                gdal.Unlink(vsimem_vrt_path)
+            except Exception:
+                pass  # nosec B110
+
     def run(self):
-        """Authenticate, download COG files to temp dir, and emit paths."""
+        """Authenticate and emit streamed COG paths."""
         try:
             from ..core.venv_manager import import_earthaccess
 
@@ -406,86 +627,34 @@ class COGDisplayWorker(QThread):
                 )
                 return
 
-            # Collect COG URLs
-            cog_urls = []
-            if self.selected_cog_url:
-                cog_urls.append(self.selected_cog_url)
-                name = os.path.basename(self.selected_cog_url).split("?")[0]
-                self.progress.emit(f"Selected: {name}")
-            else:
-                for granule in self.granules:
-                    try:
-                        try:
-                            links = granule.data_links(access="external")
-                        except TypeError:
-                            links = granule.data_links()
-
-                        for link in links:
-                            if any(
-                                ext in link.lower() for ext in [".tif", ".tiff"]
-                            ) and link.startswith("http"):
-                                cog_urls.append(link)
-                                name = os.path.basename(link).split("?")[0]
-                                self.progress.emit(f"Found: {name}")
-                                break  # first TIFF per granule
-                    except Exception as e:
-                        self.progress.emit(f"Error processing granule: {e}")
-
+            cog_urls = self._collect_cog_urls()
             if not cog_urls:
-                self.finished.emit([])
+                self.finished.emit([], None)
                 return
 
-            # Download COG files using earthaccess authenticated session
             session = earthaccess.get_requests_https_session()
-            temp_dir = os.path.join(tempfile.gettempdir(), "nasa_earthdata_cog_cache")
-            os.makedirs(temp_dir, exist_ok=True)
+            self._prime_session(session, cog_urls[0])
+            cookie_file = self._write_cookie_file(session)
 
-            results = []
-            for i, url in enumerate(cog_urls, 1):
-                layer_name = os.path.basename(url).split("?")[0]
-                local_path = os.path.join(temp_dir, layer_name)
+            if self.display_mode == "rgb":
+                rgb_urls = cog_urls[:3]
+                layer_name = "NASA Earthdata RGB Composite"
+                self.progress.emit("Preparing RGB composite stream")
+                from osgeo import gdal
 
-                self.progress.emit(f"Downloading {layer_name}... ({i}/{len(cog_urls)})")
-                try:
-                    with session.get(url, stream=True, timeout=60) as resp:
-                        resp.raise_for_status()
+                self._configure_gdal_streaming(gdal, cookie_file)
+                vrt_path = self._create_rgb_vrt(
+                    layer_name, [f"/vsicurl/{url}" for url in rgb_urls], gdal
+                )
+                results = [(layer_name, vrt_path)] if vrt_path else []
+            else:
+                results = []
+                for url in cog_urls:
+                    layer_name = os.path.basename(url).split("?")[0]
+                    results.append((layer_name, f"/vsicurl/{url}", url))
+                    self.progress.emit(f"Prepared stream: {layer_name}")
 
-                        first_chunk = b""
-                        with open(local_path, "wb") as f:
-                            for chunk in resp.iter_content(chunk_size=65536):
-                                if not chunk:
-                                    continue
-                                if not first_chunk:
-                                    first_chunk = chunk
-                                f.write(chunk)
-
-                        # Guard against an HTML login/error page saved as .tif
-                        # when auth/redirect negotiation fails.
-                        tiff_magic = (
-                            b"II*\x00",
-                            b"MM\x00*",
-                            b"II+\x00",
-                            b"MM\x00+",
-                        )
-                        if first_chunk and not any(
-                            first_chunk.startswith(sig) for sig in tiff_magic
-                        ):
-                            content_type = resp.headers.get("Content-Type", "")
-                            try:
-                                os.remove(local_path)
-                            except OSError:
-                                pass
-                            raise ValueError(
-                                "Downloaded response is not a TIFF "
-                                f"(content-type: {content_type or 'unknown'})"
-                            )
-
-                    results.append((layer_name, local_path))
-                    self.progress.emit(f"Downloaded: {layer_name}")
-                except Exception as e:
-                    self.progress.emit(f"Error downloading {layer_name}: {e}")
-
-            self.finished.emit(results)
+            self.finished.emit(results, cookie_file)
 
         except Exception as e:
             self.error.emit(str(e))
@@ -553,7 +722,11 @@ class EarthdataDockWidget(QDockWidget):
         self._search_results = None
         self._search_gdf = None
         self._footprints_layer = None
+        self._selected_footprints_layer = None
         self._temp_footprints_file = None
+        self._bbox_map_tool = None
+        self._previous_map_tool = None
+        self._adjusting_results_columns = False
 
         # Workers
         self._catalog_worker = None
@@ -615,7 +788,7 @@ class EarthdataDockWidget(QDockWidget):
         # Dataset dropdown
         self.dataset_combo = QComboBox()
         self.dataset_combo.setMaxVisibleItems(20)
-        self.dataset_combo.currentTextChanged.connect(self._on_dataset_changed)
+        self.dataset_combo.currentIndexChanged.connect(self._on_dataset_changed)
         # Use AdjustToContents so dropdown shows full text
         self.dataset_combo.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToContents
@@ -623,10 +796,17 @@ class EarthdataDockWidget(QDockWidget):
         self.dataset_combo.setMinimumContentsLength(20)
         search_layout.addRow("Dataset:", self.dataset_combo)
 
-        # Dataset title (read-only) - use disabled state for proper theming
-        self.title_label = QLineEdit()
-        self.title_label.setReadOnly(True)
-        self.title_label.setEnabled(False)  # Disabled state respects dark/light theme
+        # Dataset title (read-only), wrapped so long collection titles stay visible.
+        self.title_label = QLabel()
+        self.title_label.setWordWrap(True)
+        self.title_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.title_label.setMinimumHeight(40)
+        self.title_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
+        self.title_label.setStyleSheet("QLabel { color: palette(text); padding: 2px; }")
         search_layout.addRow("Title:", self.title_label)
 
         # Max items
@@ -645,6 +825,10 @@ class EarthdataDockWidget(QDockWidget):
         self.use_extent_btn = QPushButton("Use Map Extent")
         self.use_extent_btn.clicked.connect(self._use_map_extent)
         bbox_btn_layout.addWidget(self.use_extent_btn)
+        self.draw_bbox_btn = QPushButton("Draw Bbox")
+        self.draw_bbox_btn.setCheckable(True)
+        self.draw_bbox_btn.toggled.connect(self._toggle_draw_bbox)
+        bbox_btn_layout.addWidget(self.draw_bbox_btn)
         self.clear_bbox_btn = QPushButton("Clear")
         self.clear_bbox_btn.clicked.connect(lambda: self.bbox_input.clear())
         bbox_btn_layout.addWidget(self.clear_bbox_btn)
@@ -797,18 +981,17 @@ class EarthdataDockWidget(QDockWidget):
         self.results_table = QTableWidget()
         self.results_table.setColumnCount(3)
         self.results_table.setHorizontalHeaderLabels(["ID", "Date", "Size"])
-        # ID column stretches to fill space, Date and Size are fixed width
-        self.results_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
-        self.results_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Fixed
-        )
-        self.results_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.Fixed
-        )
-        self.results_table.setColumnWidth(1, 90)  # Date
-        self.results_table.setColumnWidth(2, 70)  # Size
+        # Start with practical widths, but keep all columns user-resizable.
+        results_header = self.results_table.horizontalHeader()
+        results_header.setSectionsClickable(True)
+        results_header.setSectionsMovable(False)
+        results_header.setMinimumSectionSize(45)
+        results_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        results_header.setStretchLastSection(False)
+        results_header.sectionResized.connect(self._on_results_section_resized)
+        self._set_default_results_column_widths()
+        self.results_table.installEventFilter(self)
+        self.results_table.viewport().installEventFilter(self)
         self.results_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
         )
@@ -827,18 +1010,51 @@ class EarthdataDockWidget(QDockWidget):
         )
         results_layout.addWidget(self.results_table)
 
-        # COG file selection dropdown
-        cog_layout = QHBoxLayout()
-        cog_layout.addWidget(QLabel("COG File:"))
-        self.cog_combo = QComboBox()
-        self.cog_combo.setEnabled(False)
-        self.cog_combo.setToolTip(
-            "Select a COG file to display from the selected granule"
+        # COG file selection controls
+        cog_mode_layout = QHBoxLayout()
+        cog_mode_layout.addWidget(QLabel("COG Mode:"))
+        self.cog_mode_combo = QComboBox()
+        self.cog_mode_combo.addItem("Single band", "single")
+        self.cog_mode_combo.addItem("RGB composite", "rgb")
+        self.cog_mode_combo.setEnabled(False)
+        self.cog_mode_combo.currentIndexChanged.connect(self._on_cog_mode_changed)
+        cog_mode_layout.addWidget(self.cog_mode_combo, 1)
+        results_layout.addLayout(cog_mode_layout)
+
+        cog_layout = QVBoxLayout()
+        self.cog_files_label = QLabel("COG Files:")
+        cog_layout.addWidget(self.cog_files_label)
+        self.cog_list = QListWidget()
+        self.cog_list.setEnabled(False)
+        self.cog_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
         )
-        self.cog_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self.cog_combo.setMinimumContentsLength(15)
-        cog_layout.addWidget(self.cog_combo, 1)  # Stretch to fill
+        self.cog_list.setMaximumHeight(86)
+        self.cog_list.setToolTip(
+            "Select one or more COG files. Use three selected files for RGB."
+        )
         results_layout.addLayout(cog_layout)
+        cog_layout.addWidget(self.cog_list)
+
+        self.rgb_channel_widget = QWidget()
+        rgb_channel_layout = QFormLayout(self.rgb_channel_widget)
+        rgb_channel_layout.setContentsMargins(0, 0, 0, 0)
+        self.rgb_red_combo = QComboBox()
+        self.rgb_green_combo = QComboBox()
+        self.rgb_blue_combo = QComboBox()
+        for combo in (
+            self.rgb_red_combo,
+            self.rgb_green_combo,
+            self.rgb_blue_combo,
+        ):
+            combo.setEnabled(False)
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+            combo.setMinimumContentsLength(18)
+        rgb_channel_layout.addRow("Red:", self.rgb_red_combo)
+        rgb_channel_layout.addRow("Green:", self.rgb_green_combo)
+        rgb_channel_layout.addRow("Blue:", self.rgb_blue_combo)
+        self.rgb_channel_widget.setVisible(False)
+        results_layout.addWidget(self.rgb_channel_widget)
 
         # Zoom to footprints button and results info
         info_layout = QHBoxLayout()
@@ -859,22 +1075,26 @@ class EarthdataDockWidget(QDockWidget):
         # Output section
         output_group = QGroupBox("Output")
         output_layout = QVBoxLayout(output_group)
+        output_layout.setContentsMargins(6, 6, 6, 6)
+        output_group.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
 
         self.output_text = QTextEdit()
         self.output_text.setReadOnly(True)
-        self.output_text.setMaximumHeight(80)
+        self.output_text.setMinimumHeight(100)
+        self.output_text.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self.output_text.setPlaceholderText("Status messages will appear here...")
         output_layout.addWidget(self.output_text)
 
-        layout.addWidget(output_group)
+        layout.addWidget(output_group, 1)
 
         # Status label
         self.status_label = QLabel("Ready")
         self.status_label.setStyleSheet("color: gray; font-size: 10px;")
         layout.addWidget(self.status_label)
-
-        # Add stretch at end
-        layout.addStretch()
 
     def _load_datasets(self):
         """Load NASA datasets from cache or download."""
@@ -902,22 +1122,39 @@ class EarthdataDockWidget(QDockWidget):
         """Reload the catalog, e.g. after dependencies are installed."""
         self._load_datasets()
 
-    def _on_catalog_loaded(self, df, names):
+    def _populate_dataset_combo(self, items):
+        """Populate dataset combo while preserving row metadata as item data."""
+        self.dataset_combo.blockSignals(True)
+        self.dataset_combo.clear()
+        for item in items:
+            self.dataset_combo.addItem(item.get("label", ""), item)
+        self.dataset_combo.blockSignals(False)
+        self._on_dataset_changed(self.dataset_combo.currentIndex())
+
+    def _select_default_dataset(self):
+        """Select the default HLSL30 collection, preferring the newer duplicate."""
+        hlsl30_indices = [
+            index
+            for index in range(self.dataset_combo.count())
+            if (self.dataset_combo.itemData(index) or {}).get("short_name") == "HLSL30"
+        ]
+        if hlsl30_indices:
+            default_index = (
+                hlsl30_indices[1] if len(hlsl30_indices) > 1 else hlsl30_indices[0]
+            )
+            self.dataset_combo.setCurrentIndex(default_index)
+
+    def _on_catalog_loaded(self, df, items):
         """Handle catalog loaded."""
         self.refresh_catalog_btn.setEnabled(True)
         self._nasa_data = df
-        self._nasa_data_names = names
+        self._nasa_data_names = items
 
-        self.dataset_combo.clear()
-        self.dataset_combo.addItems(names)
+        self._populate_dataset_combo(items)
+        self._select_default_dataset()
 
-        # Set default dataset
-        default_dataset = "HLSL30"
-        if default_dataset in names:
-            self.dataset_combo.setCurrentText(default_dataset)
-
-        self._log(f"Loaded {len(names)} datasets")
-        self.status_label.setText(f"{len(names)} datasets available")
+        self._log(f"Loaded {len(items)} datasets")
+        self.status_label.setText(f"{len(items)} datasets available")
 
     def _on_catalog_error(self, error_msg):
         """Handle catalog load error."""
@@ -944,12 +1181,11 @@ class EarthdataDockWidget(QDockWidget):
         )
 
     def _filter_datasets(self):
-        """Filter datasets based on keyword in ShortName and EntryTitle only."""
+        """Filter datasets based on ShortName, title, and collection metadata."""
         keyword = self.keyword_input.text().strip().lower()
 
         if not keyword:
-            self.dataset_combo.clear()
-            self.dataset_combo.addItems(self._nasa_data_names)
+            self._populate_dataset_combo(self._nasa_data_names)
             return
 
         if self._nasa_data is None:
@@ -957,24 +1193,30 @@ class EarthdataDockWidget(QDockWidget):
 
         filtered = self._nasa_data.filter_by_keyword(keyword)
 
-        self.dataset_combo.clear()
-        self.dataset_combo.addItems(filtered)
+        self._populate_dataset_combo(filtered)
 
         self._log(f"Found {len(filtered)} datasets matching '{keyword}'")
 
-    def _on_dataset_changed(self, short_name):
+    def _on_dataset_changed(self, _index):
         """Handle dataset selection change."""
-        if self._nasa_data is None or not short_name:
+        item = self.dataset_combo.currentData()
+        if self._nasa_data is None or not item:
+            self.title_label.clear()
+            self.title_label.setToolTip("")
+            self._clear_results()
             return
 
         try:
-            title = self._nasa_data.get_title(short_name)
+            title = item.get("title")
             if title:
                 self.title_label.setText(title)
+                self.title_label.setToolTip(title)
             else:
                 self.title_label.clear()
+                self.title_label.setToolTip("")
         except Exception:
             self.title_label.clear()
+            self.title_label.setToolTip("")
 
         # Clear previous search results when dataset changes
         self._clear_results()
@@ -986,8 +1228,10 @@ class EarthdataDockWidget(QDockWidget):
         self.display_btn.setEnabled(False)
         self.download_btn.setEnabled(False)
         self.zoom_footprints_btn.setEnabled(False)
-        self.cog_combo.clear()
-        self.cog_combo.setEnabled(False)
+        self.cog_list.clear()
+        self.cog_list.setEnabled(False)
+        self.cog_mode_combo.setEnabled(False)
+        self._clear_rgb_channel_combos()
         self._search_results = None
         self._search_gdf = None
         self._remove_footprints()
@@ -1011,13 +1255,151 @@ class EarthdataDockWidget(QDockWidget):
         bbox_str = f"{extent.xMinimum():.4f}, {extent.yMinimum():.4f}, {extent.xMaximum():.4f}, {extent.yMaximum():.4f}"
         self.bbox_input.setText(bbox_str)
 
+    def _extent_to_wgs84_bbox_text(self, extent):
+        """Convert a map-canvas extent to formatted WGS84 bbox text."""
+        canvas = self.iface.mapCanvas()
+        crs = canvas.mapSettings().destinationCrs()
+        if crs.authid() != "EPSG:4326":
+            transform = QgsCoordinateTransform(
+                crs,
+                QgsCoordinateReferenceSystem("EPSG:4326"),
+                QgsProject.instance(),
+            )
+            extent = transform.transformBoundingBox(extent)
+
+        xmin = min(extent.xMinimum(), extent.xMaximum())
+        ymin = min(extent.yMinimum(), extent.yMaximum())
+        xmax = max(extent.xMinimum(), extent.xMaximum())
+        ymax = max(extent.yMinimum(), extent.yMaximum())
+        return f"{xmin:.4f}, {ymin:.4f}, {xmax:.4f}, {ymax:.4f}"
+
+    def _set_bbox_from_drawn_extent(self, extent):
+        """Set bbox input from a drawn map extent and restore previous map tool."""
+        self.bbox_input.setText(self._extent_to_wgs84_bbox_text(extent))
+        self._log("Bounding box set from drawn rectangle")
+        self._finish_draw_bbox()
+
+    def _finish_draw_bbox(self):
+        """Restore the previous map tool after bbox drawing."""
+        canvas = self.iface.mapCanvas()
+        self.draw_bbox_btn.blockSignals(True)
+        self.draw_bbox_btn.setChecked(False)
+        self.draw_bbox_btn.blockSignals(False)
+        self.draw_bbox_btn.setEnabled(True)
+
+        if self._previous_map_tool is not None:
+            try:
+                canvas.setMapTool(self._previous_map_tool)
+            except Exception:
+                pass  # nosec B110
+
+        self._previous_map_tool = None
+        self._bbox_map_tool = None
+
+    def _toggle_draw_bbox(self, checked):
+        """Start or cancel bbox drawing from the toggle button."""
+        if checked:
+            self._start_draw_bbox()
+        else:
+            self._finish_draw_bbox()
+
+    def _start_draw_bbox(self):
+        """Activate a one-shot map tool for drawing a bounding box."""
+        try:
+            from qgis.PyQt.QtGui import QColor
+            from qgis.core import QgsGeometry, QgsPointXY, QgsWkbTypes
+            from qgis.gui import QgsMapTool, QgsRubberBand
+        except Exception as e:
+            self.draw_bbox_btn.blockSignals(True)
+            self.draw_bbox_btn.setChecked(False)
+            self.draw_bbox_btn.blockSignals(False)
+            QMessageBox.warning(
+                self,
+                "Draw Bbox",
+                f"Could not activate the bounding box drawing tool:\n{e}",
+            )
+            return
+
+        dock = self
+        canvas = self.iface.mapCanvas()
+
+        class BboxMapTool(QgsMapTool):
+            def __init__(self, map_canvas):
+                super().__init__(map_canvas)
+                self.canvas = map_canvas
+                self.start_point = None
+                geometry_type = getattr(
+                    getattr(QgsWkbTypes, "GeometryType", QgsWkbTypes),
+                    "PolygonGeometry",
+                    2,
+                )
+                self.rubber_band = QgsRubberBand(map_canvas, geometry_type)
+                self.rubber_band.setColor(QColor(255, 235, 59, 80))
+                if hasattr(self.rubber_band, "setStrokeColor"):
+                    self.rubber_band.setStrokeColor(QColor(255, 235, 59, 220))
+                self.rubber_band.setWidth(2)
+
+            def canvasPressEvent(self, event):
+                self.start_point = self.toMapCoordinates(event.pos())
+                self._update_rubber_band(self.start_point)
+
+            def canvasMoveEvent(self, event):
+                if self.start_point is None:
+                    return
+                self._update_rubber_band(self.toMapCoordinates(event.pos()))
+
+            def canvasReleaseEvent(self, event):
+                if self.start_point is None:
+                    dock._finish_draw_bbox()
+                    return
+
+                end_point = self.toMapCoordinates(event.pos())
+                rect = QgsRectangle(self.start_point, end_point)
+                self.rubber_band.reset()
+                if rect.width() == 0 or rect.height() == 0:
+                    dock._finish_draw_bbox()
+                    return
+
+                dock._set_bbox_from_drawn_extent(rect)
+
+            def deactivate(self):
+                try:
+                    self.rubber_band.reset()
+                except Exception:
+                    pass  # nosec B110
+                super().deactivate()
+
+            def _update_rubber_band(self, end_point):
+                rect = QgsRectangle(self.start_point, end_point)
+                points = [
+                    QgsPointXY(rect.xMinimum(), rect.yMinimum()),
+                    QgsPointXY(rect.xMinimum(), rect.yMaximum()),
+                    QgsPointXY(rect.xMaximum(), rect.yMaximum()),
+                    QgsPointXY(rect.xMaximum(), rect.yMinimum()),
+                    QgsPointXY(rect.xMinimum(), rect.yMinimum()),
+                ]
+                self.rubber_band.setToGeometry(QgsGeometry.fromPolygonXY([points]))
+
+        self._previous_map_tool = canvas.mapTool()
+        self._bbox_map_tool = BboxMapTool(canvas)
+        canvas.setMapTool(self._bbox_map_tool)
+        self._log("Draw a rectangle on the map to set the bounding box")
+
     def _toggle_advanced_options(self, checked):
         """Toggle visibility of advanced options."""
         self.advanced_widget.setVisible(checked)
 
     def _search_data(self):
         """Search NASA Earthdata."""
-        short_name = self.dataset_combo.currentText()
+        dataset_item = self.dataset_combo.currentData()
+        if dataset_item:
+            short_name = dataset_item.get("short_name", "")
+            concept_id = dataset_item.get("concept_id", "")
+            dataset_label = dataset_item.get("label", short_name)
+        else:
+            short_name = self.dataset_combo.currentText()
+            concept_id = ""
+            dataset_label = short_name
         if not short_name:
             QMessageBox.warning(self, "Warning", "Please select a dataset.")
             return
@@ -1106,11 +1488,15 @@ class EarthdataDockWidget(QDockWidget):
         self.search_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
-        self._log(f"Searching {short_name}...")
+        if concept_id:
+            self._log(f"Searching {dataset_label} by concept-id...")
+        else:
+            self._log(f"Searching {short_name}...")
 
         # Start search worker
         self._search_worker = DataSearchWorker(
             short_name,
+            concept_id,
             bbox,
             temporal,
             max_items,
@@ -1179,7 +1565,10 @@ class EarthdataDockWidget(QDockWidget):
                             break
 
                 # Create items with tooltips for full text
-                id_item = QTableWidgetItem(str(native_id))
+                id_item = QTableWidgetItem(_compact_result_id(native_id))
+                id_item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
                 id_item.setToolTip(str(native_id))  # Show full ID on hover
                 id_item.setData(
                     Qt.ItemDataRole.UserRole, i
@@ -1187,27 +1576,44 @@ class EarthdataDockWidget(QDockWidget):
                 self.results_table.setItem(i, 0, id_item)
 
                 date_item = QTableWidgetItem(str(time_start))
+                date_item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
                 self.results_table.setItem(i, 1, date_item)
 
                 # Store raw bytes for proper numeric sorting
                 size_item = NumericTableWidgetItem(str(size_display))
+                size_item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
                 size_item.setData(
                     Qt.ItemDataRole.UserRole, size_bytes
                 )  # Store raw value for sorting
                 self.results_table.setItem(i, 2, size_item)
             except Exception:
                 id_item = QTableWidgetItem(f"Item {i+1}")
+                id_item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
                 id_item.setToolTip(f"Item {i+1}")
                 id_item.setData(Qt.ItemDataRole.UserRole, i)
                 self.results_table.setItem(i, 0, id_item)
-                self.results_table.setItem(i, 1, QTableWidgetItem("N/A"))
+                date_item = QTableWidgetItem("N/A")
+                date_item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
+                self.results_table.setItem(i, 1, date_item)
 
                 size_item = NumericTableWidgetItem("N/A")
+                size_item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
                 size_item.setData(Qt.ItemDataRole.UserRole, 0)  # Store 0 for N/A
                 self.results_table.setItem(i, 2, size_item)
 
         # Re-enable sorting after population
         self.results_table.setSortingEnabled(True)
+        self._set_default_results_column_widths()
 
         # Add footprints to map
         self._add_footprints(gdf)
@@ -1378,6 +1784,7 @@ class EarthdataDockWidget(QDockWidget):
 
     def _remove_footprints(self):
         """Remove footprints layer from map and clean up temporary file."""
+        self._remove_selected_footprints()
         if self._footprints_layer is not None:
             try:
                 # Remove layer from project
@@ -1422,6 +1829,65 @@ class EarthdataDockWidget(QDockWidget):
                             )
             self._temp_footprints_file = None
 
+    def _remove_selected_footprints(self):
+        """Remove the outline-only selected footprint overlay."""
+        if self._selected_footprints_layer is not None:
+            try:
+                QgsProject.instance().removeMapLayer(
+                    self._selected_footprints_layer.id()
+                )
+            except Exception:
+                pass  # nosec B110
+            try:
+                del self._selected_footprints_layer
+            except Exception:
+                pass  # nosec B110
+            self._selected_footprints_layer = None
+
+    def _add_selected_footprints_overlay(self, features):
+        """Draw selected footprints as a yellow outline layer above results."""
+        if not features:
+            return
+
+        try:
+            from qgis.core import (
+                QgsFeature,
+                QgsFillSymbol,
+                QgsSingleSymbolRenderer,
+                QgsWkbTypes,
+            )
+
+            geometry_name = QgsWkbTypes.displayString(self._footprints_layer.wkbType())
+            if "Polygon" not in geometry_name:
+                geometry_name = "Polygon"
+            selected_layer = QgsVectorLayer(
+                f"{geometry_name}?crs=EPSG:4326",
+                "Selected NASA Earthdata Footprints",
+                "memory",
+            )
+            provider = selected_layer.dataProvider()
+            overlay_features = []
+            for source_feature in features:
+                feature = QgsFeature()
+                feature.setGeometry(source_feature.geometry())
+                overlay_features.append(feature)
+
+            provider.addFeatures(overlay_features)
+            selected_layer.updateExtents()
+
+            symbol = QgsFillSymbol.createSimple(
+                {
+                    "color": "255,255,0,0",
+                    "outline_color": "#ffeb3b",
+                    "outline_width": "1.2",
+                }
+            )
+            selected_layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+            QgsProject.instance().addMapLayer(selected_layer)
+            self._selected_footprints_layer = selected_layer
+        except Exception as e:
+            self._log(f"Error drawing selected footprint outline: {e}", error=True)
+
     def _on_selection_changed(self):
         """Handle table selection change."""
         selected_rows = self.results_table.selectionModel().selectedRows()
@@ -1438,8 +1904,10 @@ class EarthdataDockWidget(QDockWidget):
             self.display_btn.setEnabled(has_results)
             self.download_btn.setEnabled(has_results)
             # Clear COG dropdown
-            self.cog_combo.clear()
-            self.cog_combo.setEnabled(False)
+            self.cog_list.clear()
+            self.cog_list.setEnabled(False)
+            self.cog_mode_combo.setEnabled(False)
+            self._clear_rgb_channel_combos()
 
         self._sync_footprint_selection_from_table()
 
@@ -1483,11 +1951,13 @@ class EarthdataDockWidget(QDockWidget):
         try:
             selected_indices = set(self._get_selected_result_indices())
             self._footprints_layer.removeSelection()
+            self._remove_selected_footprints()
 
             if not selected_indices:
+                self.iface.mapCanvas().refresh()
                 return
 
-            feature_ids = []
+            selected_features = []
             field_names = [f.name() for f in self._footprints_layer.fields()]
             has_result_idx_field = "result_idx" in field_names
 
@@ -1501,10 +1971,10 @@ class EarthdataDockWidget(QDockWidget):
                     feature_result_idx = feature_pos
 
                 if feature_result_idx in selected_indices:
-                    feature_ids.append(feature.id())
+                    selected_features.append(feature)
 
-            if feature_ids:
-                self._footprints_layer.selectByIds(feature_ids)
+            self._add_selected_footprints_overlay(selected_features)
+            self.iface.mapCanvas().refresh()
         except Exception as e:
             self._log(f"Error syncing footprint selection: {e}", error=True)
 
@@ -1531,10 +2001,70 @@ class EarthdataDockWidget(QDockWidget):
             f"Sorted by column {logical_index} ({'descending' if new_order == Qt.SortOrder.DescendingOrder else 'ascending'})"
         )
 
+    def _set_default_results_column_widths(self):
+        """Set initial Date/Size widths and make ID fill the remaining space."""
+        if self._adjusting_results_columns:
+            return
+
+        self._adjusting_results_columns = True
+        try:
+            self.results_table.setColumnWidth(1, 90)
+            self.results_table.setColumnWidth(2, 80)
+        finally:
+            self._adjusting_results_columns = False
+
+        self._fit_results_columns_to_width()
+
+    def _fit_results_columns_to_width(self):
+        """Make the ID column fill leftover width after Date and Size columns."""
+        if self._adjusting_results_columns:
+            return
+
+        viewport_width = self.results_table.viewport().width()
+        if viewport_width <= 0:
+            viewport_width = self.results_table.width()
+        if viewport_width <= 0:
+            return
+
+        header = self.results_table.horizontalHeader()
+        min_width = max(45, header.minimumSectionSize())
+        date_width = max(min_width, self.results_table.columnWidth(1) or 90)
+        size_width = max(min_width, self.results_table.columnWidth(2) or 80)
+        id_width = max(180, viewport_width - date_width - size_width)
+
+        self._adjusting_results_columns = True
+        try:
+            self.results_table.setColumnWidth(0, id_width)
+        finally:
+            self._adjusting_results_columns = False
+
+    def _on_results_section_resized(self, logical_index, _old_size, _new_size):
+        """Keep ID as the fill column when Date or Size is resized."""
+        if logical_index in (1, 2) and not self._adjusting_results_columns:
+            QTimer.singleShot(0, self._fit_results_columns_to_width)
+
+    def eventFilter(self, obj, event):
+        """Keep results columns fitted when the table viewport changes size."""
+        if (
+            hasattr(self, "results_table")
+            and obj in (self.results_table, self.results_table.viewport())
+            and event.type() == QEvent.Type.Resize
+        ):
+            QTimer.singleShot(0, self._fit_results_columns_to_width)
+        return super().eventFilter(obj, event)
+
+    def _sort_cog_links(self, cog_links):
+        """Return COG links sorted by displayed filename."""
+        return sorted(
+            cog_links, key=lambda link: os.path.basename(link).split("?")[0].lower()
+        )
+
     def _populate_cog_dropdown(self, row_index):
-        """Populate the COG dropdown with available files for the selected granule."""
-        self.cog_combo.clear()
-        self.cog_combo.setEnabled(False)
+        """Populate the COG list with available files for the selected granule."""
+        self.cog_list.clear()
+        self.cog_list.setEnabled(False)
+        self.cog_mode_combo.setEnabled(False)
+        self._clear_rgb_channel_combos()
 
         result_index = self._get_result_index_for_table_row(row_index)
         if self._search_results is None or result_index >= len(self._search_results):
@@ -1556,20 +2086,124 @@ class EarthdataDockWidget(QDockWidget):
                 if any(ext in link.lower() for ext in [".tif", ".tiff"])
                 and link.startswith("http")
             ]
+            cog_links = self._sort_cog_links(cog_links)
 
             if cog_links:
-                # Add COG files to dropdown (show just filenames)
+                # Add COG files to list (show just filenames)
                 for link in cog_links:
                     filename = os.path.basename(link).split("?")[0]
-                    self.cog_combo.addItem(filename, link)  # Store full URL as data
+                    item = QListWidgetItem(filename)
+                    item.setToolTip(link)
+                    item.setData(Qt.ItemDataRole.UserRole, link)
+                    self.cog_list.addItem(item)
 
-                self.cog_combo.setEnabled(True)
+                self.cog_list.setEnabled(True)
+                self.cog_mode_combo.setEnabled(True)
+                if self.cog_list.count() > 0:
+                    self.cog_list.setCurrentRow(0)
+                self._populate_rgb_channel_combos(cog_links)
                 self._log(f"Found {len(cog_links)} COG file(s) for selected granule")
             else:
-                self.cog_combo.addItem("No COG files found")
+                self.cog_list.addItem("No COG files found")
 
         except Exception as e:
-            self.cog_combo.addItem(f"Error: {str(e)[:30]}")
+            self.cog_list.addItem(f"Error: {str(e)[:30]}")
+
+    def _on_cog_mode_changed(self, _index):
+        """Toggle controls for the selected COG display mode."""
+        is_rgb = self.cog_mode_combo.currentData() == "rgb"
+        self.cog_files_label.setVisible(not is_rgb)
+        self.cog_list.setVisible(not is_rgb)
+        self.rgb_channel_widget.setVisible(is_rgb)
+
+    def _clear_rgb_channel_combos(self):
+        """Clear and disable RGB channel selectors."""
+        for combo in (
+            self.rgb_red_combo,
+            self.rgb_green_combo,
+            self.rgb_blue_combo,
+        ):
+            combo.clear()
+            combo.setEnabled(False)
+
+    def _populate_rgb_channel_combos(self, cog_links):
+        """Populate RGB channel selectors and choose common natural-color bands."""
+        channel_combos = (
+            self.rgb_red_combo,
+            self.rgb_green_combo,
+            self.rgb_blue_combo,
+        )
+        for combo in channel_combos:
+            combo.clear()
+            for link in cog_links:
+                filename = os.path.basename(link).split("?")[0]
+                combo.addItem(filename, link)
+            combo.setEnabled(bool(cog_links))
+
+        defaults = self._guess_rgb_channel_indices(cog_links)
+        for combo, index in zip(channel_combos, defaults):
+            if 0 <= index < combo.count():
+                combo.setCurrentIndex(index)
+
+    def _guess_rgb_channel_indices(self, cog_links):
+        """Guess Red/Green/Blue defaults from common COG filename band tokens."""
+
+        def find_band(candidates):
+            for idx, link in enumerate(cog_links):
+                name = os.path.basename(link).split("?")[0].lower()
+                for token in candidates:
+                    if token in name:
+                        return idx
+            return -1
+
+        red = find_band((".b04.", "_b04_", "-b04-", ".b4.", "_b4_", "-b4-", "red"))
+        green = find_band((".b03.", "_b03_", "-b03-", ".b3.", "_b3_", "-b3-", "green"))
+        blue = find_band((".b02.", "_b02_", "-b02-", ".b2.", "_b2_", "-b2-", "blue"))
+
+        fallback = list(range(min(3, len(cog_links))))
+        while len(fallback) < 3:
+            fallback.append(-1)
+        return (
+            red if red >= 0 else fallback[0],
+            green if green >= 0 else fallback[1],
+            blue if blue >= 0 else fallback[2],
+        )
+
+    def _get_selected_cog_urls(self):
+        """Return selected COG URLs from the list in visual row order."""
+        if not self.cog_list.isEnabled():
+            return []
+
+        selected_items = self.cog_list.selectedItems()
+        if not selected_items and self.cog_list.currentItem() is not None:
+            selected_items = [self.cog_list.currentItem()]
+
+        selected_rows = sorted(self.cog_list.row(item) for item in selected_items)
+        urls = []
+        for row in selected_rows:
+            item = self.cog_list.item(row)
+            if item is None:
+                continue
+            url = item.data(Qt.ItemDataRole.UserRole)
+            if url:
+                urls.append(url)
+        return urls
+
+    def _get_rgb_channel_urls(self):
+        """Return selected RGB URLs in Red, Green, Blue order."""
+        urls = []
+        labels = []
+        for label, combo in (
+            ("Red", self.rgb_red_combo),
+            ("Green", self.rgb_green_combo),
+            ("Blue", self.rgb_blue_combo),
+        ):
+            url = combo.currentData()
+            if not url:
+                return [], []
+            urls.append(url)
+            labels.append(f"{label}={combo.currentText()}")
+        return urls, labels
 
     def _get_selected_granules(self):
         """Get the selected granules from the table."""
@@ -1585,16 +2219,32 @@ class EarthdataDockWidget(QDockWidget):
 
     def _display_cog(self):
         """Display selected COG layers using a worker thread."""
-        # Check if a specific COG is selected in the dropdown
-        selected_cog_url = None
-        if self.cog_combo.isEnabled() and self.cog_combo.currentIndex() >= 0:
-            selected_cog_url = (
-                self.cog_combo.currentData()
-            )  # Get the full URL stored as data
+        display_mode = self.cog_mode_combo.currentData() or "single"
+        selected_cog_urls = self._get_selected_cog_urls()
+        rgb_labels = []
 
-        if selected_cog_url:
-            # Display the specific COG selected in dropdown
-            self._log(f"Displaying: {self.cog_combo.currentText()}")
+        if display_mode == "rgb":
+            selected_cog_urls, rgb_labels = self._get_rgb_channel_urls()
+            if len(selected_cog_urls) != 3:
+                QMessageBox.warning(
+                    self,
+                    "RGB Composite",
+                    "Select a COG file for each RGB channel.",
+                )
+                return
+            if len(set(selected_cog_urls)) != 3:
+                QMessageBox.warning(
+                    self,
+                    "RGB Composite",
+                    "Select three different COG files for RGB display.",
+                )
+                return
+
+        if selected_cog_urls:
+            if display_mode == "rgb":
+                self._log("Displaying RGB composite: " + ", ".join(rgb_labels))
+            else:
+                self._log(f"Displaying {len(selected_cog_urls)} selected COG stream(s)")
         else:
             # No specific COG selected, will display first COG from each selected granule
             granules = self._get_selected_granules()
@@ -1608,23 +2258,22 @@ class EarthdataDockWidget(QDockWidget):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
 
-        # Set wait cursor
-        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
-
         # Read credentials from Settings input boxes as fallback
         username, password = self._get_settings_input_credentials()
 
         # Start COG worker
-        if selected_cog_url:
+        if selected_cog_urls:
             self._cog_worker = COGDisplayWorker(
                 [],
-                selected_cog_url=selected_cog_url,
+                selected_cog_urls=selected_cog_urls,
+                display_mode=display_mode,
                 username=username,
                 password=password,
             )
         else:
             self._cog_worker = COGDisplayWorker(
                 self._get_selected_granules(),
+                display_mode="single",
                 username=username,
                 password=password,
             )
@@ -1658,9 +2307,9 @@ class EarthdataDockWidget(QDockWidget):
         """Handle COG display completion.
 
         Args:
-            results: List of (layer_name, local_path) or legacy
-                (layer_name, vsi_path, url) tuples.
-            cookie_file: Optional cookie file for legacy /vsicurl loading.
+            results: List of (layer_name, raster_path) tuples. Single-band COGs
+                use /vsicurl/ paths; RGB entries use worker-created local VRTs.
+            cookie_file: Optional cookie file for /vsicurl loading.
         """
         from osgeo import gdal
 
@@ -1668,8 +2317,6 @@ class EarthdataDockWidget(QDockWidget):
         self.progress_bar.setVisible(False)
 
         if not results:
-            # Restore cursor and UI before showing dialog
-            QApplication.restoreOverrideCursor()
             self.display_btn.setEnabled(True)
             self._log("No COG files found in selection")
             QMessageBox.information(
@@ -1686,10 +2333,11 @@ class EarthdataDockWidget(QDockWidget):
             and item[1].startswith("/vsicurl/")
             for item in results
         )
-        if using_vsicurl and cookie_file:
-            # Legacy path: configure GDAL auth for NASA Earthdata redirects.
-            gdal.SetConfigOption("GDAL_HTTP_COOKIEFILE", cookie_file)
-            gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", cookie_file)
+        if using_vsicurl:
+            # Configure GDAL auth and conservative network behavior for streamed COGs.
+            if cookie_file:
+                gdal.SetConfigOption("GDAL_HTTP_COOKIEFILE", cookie_file)
+                gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", cookie_file)
             netrc_path = os.path.expanduser("~/.netrc")
             if os.path.exists(netrc_path):
                 gdal.SetConfigOption("GDAL_HTTP_NETRC", "YES")
@@ -1712,18 +2360,7 @@ class EarthdataDockWidget(QDockWidget):
                 # Process events to update UI while loading
                 QApplication.processEvents()
 
-                # Use gdal.Open to get a detailed error message if it fails
-                gdal.PushErrorHandler("CPLQuietErrorHandler")
-                ds = gdal.Open(raster_path)
-                gdal_err = gdal.GetLastErrorMsg()
-                gdal.PopErrorHandler()
-
-                if ds is not None:
-                    ds = None  # Close dataset before QGIS opens it
-                    layer = QgsRasterLayer(raster_path, layer_name)
-                else:
-                    self._log(f"GDAL error: {gdal_err}", error=True)
-                    layer = None
+                layer = QgsRasterLayer(raster_path, layer_name)
 
                 if layer is not None and layer.isValid():
                     QgsProject.instance().addMapLayer(layer)
@@ -1734,8 +2371,7 @@ class EarthdataDockWidget(QDockWidget):
             except Exception as e:
                 self._log(f"Error adding layer {layer_name}: {e}", error=True)
 
-        # Restore cursor and UI after all layers are loaded
-        QApplication.restoreOverrideCursor()
+        # Restore UI after all layers are loaded
         self.display_btn.setEnabled(True)
 
         if added_count > 0:
@@ -1749,13 +2385,12 @@ class EarthdataDockWidget(QDockWidget):
                 self,
                 "COG Display",
                 "Could not display COG files from the selected data.\n\n"
-                "The authenticated COG request did not return a valid GeoTIFF.\n"
+                "The streamed COG request did not return a valid GeoTIFF.\n"
                 "Please verify NASA Earthdata credentials in Settings.",
             )
 
     def _on_cog_error(self, error_msg):
         """Handle COG display error."""
-        QApplication.restoreOverrideCursor()
         self.display_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         self._log(f"COG display error: {error_msg}", error=True)
@@ -1766,7 +2401,7 @@ class EarthdataDockWidget(QDockWidget):
         # Check if specific rows are selected
         selected_rows = self.results_table.selectionModel().selectedRows()
         if selected_rows and self._search_results:
-            indices = [row.row() for row in selected_rows]
+            indices = self._get_selected_result_indices()
             granules = [
                 self._search_results[i]
                 for i in indices
@@ -1895,9 +2530,8 @@ class EarthdataDockWidget(QDockWidget):
 
         # Reset dataset list
         if self._nasa_data_names:
-            self.dataset_combo.clear()
-            self.dataset_combo.addItems(self._nasa_data_names)
-            self.dataset_combo.setCurrentText("HLSL30")
+            self._populate_dataset_combo(self._nasa_data_names)
+            self._select_default_dataset()
 
     def _log(self, message, error=False):
         """Log a message to the output text area."""
@@ -1919,6 +2553,8 @@ class EarthdataDockWidget(QDockWidget):
 
     def closeEvent(self, event):
         """Handle dock widget close event."""
+        self._finish_draw_bbox()
+
         # Stop workers
         for worker in [
             self._catalog_worker,
