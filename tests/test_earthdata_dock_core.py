@@ -3,6 +3,7 @@ from nasa_earthdata.dialogs.earthdata_dock import (
     CatalogLoadWorker,
     DataSearchWorker,
     EarthdataDockWidget,
+    IndexVrtWorker,
     _compact_result_id,
 )
 
@@ -137,6 +138,50 @@ def test_cog_links_sort_by_displayed_filename():
         "https://example.test/path/HLS.B02.tif",
         "https://example.test/path/HLS.B10.tif?token=z",
     ]
+
+
+def test_index_vrt_worker_is_lazy_and_configured(tmp_path):
+    output = tmp_path / "ndvi.vrt"
+    worker = IndexVrtWorker(
+        "https://example.test/HLS.B05.tif",
+        "https://example.test/HLS.B04.tif",
+        "ndvi",
+        str(output),
+    )
+
+    assert worker.index_name == "ndvi"
+    assert worker.output_path == str(output)
+    assert worker._source_path("https://example.test/HLS.B05.tif").startswith(
+        "/vsicurl/"
+    )
+
+
+def test_index_layer_visual_range_sets_normalized_bounds():
+    class FakeRenderer:
+        def __init__(self):
+            self.minimum = None
+            self.maximum = None
+
+        def setClassificationMin(self, value):
+            self.minimum = value
+
+        def setClassificationMax(self, value):
+            self.maximum = value
+
+    class FakeLayer:
+        def __init__(self):
+            self.fake_renderer = FakeRenderer()
+
+        def renderer(self):
+            return self.fake_renderer
+
+    dock = type("Dock", (), {"_log": lambda *args, **kwargs: None})()
+    layer = FakeLayer()
+
+    EarthdataDockWidget._set_index_layer_visual_range(dock, layer)
+
+    assert layer.fake_renderer.minimum == -1.0
+    assert layer.fake_renderer.maximum == 1.0
 
 
 def test_compact_result_id_preserves_start_and_end():

@@ -99,7 +99,16 @@ class SearchEarthdataAlgorithm(_BaseAlgorithm):
     START_DATE = "START_DATE"
     END_DATE = "END_DATE"
     MAX_ITEMS = "MAX_ITEMS"
+    CLOUD_MIN = "CLOUD_MIN"
+    CLOUD_MAX = "CLOUD_MAX"
+    DAY_NIGHT = "DAY_NIGHT"
+    PROVIDER = "PROVIDER"
+    VERSION = "VERSION"
+    GRANULE_ID = "GRANULE_ID"
+    ORBIT_MIN = "ORBIT_MIN"
+    ORBIT_MAX = "ORBIT_MAX"
     OUTPUT = "OUTPUT"
+    OUTPUT_JSON = "OUTPUT_JSON"
     COUNT = "COUNT"
 
     def name(self):
@@ -133,10 +142,75 @@ class SearchEarthdataAlgorithm(_BaseAlgorithm):
             )
         )
         self._add_parameter(
+            QgsProcessingParameterNumber(
+                self.CLOUD_MIN,
+                "Minimum cloud cover",
+                type=QgsProcessingParameterNumber.Integer,
+                defaultValue=0,
+                minValue=0,
+                maxValue=100,
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterNumber(
+                self.CLOUD_MAX,
+                "Maximum cloud cover",
+                type=QgsProcessingParameterNumber.Integer,
+                defaultValue=100,
+                minValue=0,
+                maxValue=100,
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterEnum(
+                self.DAY_NIGHT,
+                "Day/night",
+                options=["Any", "Day only", "Night only", "Both/unspecified"],
+                defaultValue=0,
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterString(self.PROVIDER, "Provider", optional=True)
+        )
+        self._add_parameter(
+            QgsProcessingParameterString(self.VERSION, "Version", optional=True)
+        )
+        self._add_parameter(
+            QgsProcessingParameterString(
+                self.GRANULE_ID, "Granule ID pattern", optional=True
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterNumber(
+                self.ORBIT_MIN,
+                "Minimum orbit number",
+                type=QgsProcessingParameterNumber.Integer,
+                defaultValue=0,
+                minValue=0,
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterNumber(
+                self.ORBIT_MAX,
+                "Maximum orbit number",
+                type=QgsProcessingParameterNumber.Integer,
+                defaultValue=0,
+                minValue=0,
+            )
+        )
+        self._add_parameter(
             QgsProcessingParameterFileDestination(
                 self.OUTPUT,
                 "Result footprints GeoJSON",
                 fileFilter="GeoJSON files (*.geojson)",
+                optional=True,
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterFileDestination(
+                self.OUTPUT_JSON,
+                "Raw granules JSON",
+                fileFilter="JSON files (*.json)",
                 optional=True,
             )
         )
@@ -154,6 +228,14 @@ class SearchEarthdataAlgorithm(_BaseAlgorithm):
         start_date = self._parameter_as_string(parameters, self.START_DATE, context)
         end_date = self._parameter_as_string(parameters, self.END_DATE, context)
         max_items = self._parameter_as_int(parameters, self.MAX_ITEMS, context)
+        cloud_min = self._parameter_as_int(parameters, self.CLOUD_MIN, context)
+        cloud_max = self._parameter_as_int(parameters, self.CLOUD_MAX, context)
+        day_night_index = self._parameter_as_int(parameters, self.DAY_NIGHT, context)
+        provider = self._parameter_as_string(parameters, self.PROVIDER, context)
+        version = self._parameter_as_string(parameters, self.VERSION, context)
+        granule_id = self._parameter_as_string(parameters, self.GRANULE_ID, context)
+        orbit_min = self._parameter_as_int(parameters, self.ORBIT_MIN, context)
+        orbit_max = self._parameter_as_int(parameters, self.ORBIT_MAX, context)
 
         bbox = None
         if bbox_text:
@@ -163,7 +245,30 @@ class SearchEarthdataAlgorithm(_BaseAlgorithm):
             bbox = tuple(parts)
         temporal = (start_date, end_date) if start_date and end_date else None
 
-        worker = DataSearchWorker(short_name, concept_id, bbox, temporal, max_items)
+        day_night = [None, "day", "night", "unspecified"][day_night_index]
+        orbit_number = None
+        if orbit_min or orbit_max:
+            orbit_number = (
+                (orbit_min, orbit_max)
+                if orbit_min and orbit_max
+                else orbit_min or orbit_max
+            )
+
+        worker = DataSearchWorker(
+            short_name,
+            concept_id,
+            bbox,
+            temporal,
+            max_items,
+            cloud_cover=(
+                (cloud_min, cloud_max) if cloud_min > 0 or cloud_max < 100 else None
+            ),
+            day_night=day_night,
+            provider=provider or None,
+            version=version or None,
+            granule_id=granule_id or None,
+            orbit_number=orbit_number,
+        )
         kwargs = worker._build_search_kwargs()
         if feedback:
             feedback.pushInfo(f"Searching NASA Earthdata with {kwargs}")
@@ -171,6 +276,7 @@ class SearchEarthdataAlgorithm(_BaseAlgorithm):
         from nasa_earthdata.core.venv_manager import import_earthaccess
         from nasa_earthdata.core.workflows import (
             granules_to_export_rows,
+            write_granules_json,
             write_results_geojson,
         )
 
@@ -183,7 +289,16 @@ class SearchEarthdataAlgorithm(_BaseAlgorithm):
                 {"short_name": short_name, "concept_id": concept_id},
             )
             write_results_geojson(output, rows, None)
-        return {self.OUTPUT: output, self.COUNT: len(granules)}
+        output_json = self._parameter_as_file_output(
+            parameters, self.OUTPUT_JSON, context
+        )
+        if output_json:
+            write_granules_json(output_json, granules)
+        return {
+            self.OUTPUT: output,
+            self.OUTPUT_JSON: output_json,
+            self.COUNT: len(granules),
+        }
 
 
 class DownloadGranulesAlgorithm(_BaseAlgorithm):
@@ -361,4 +476,158 @@ class CreateRgbCogLayerAlgorithm(_BaseAlgorithm):
         vrt = None
         if not os.path.exists(output):
             raise QgsProcessingException("RGB VRT was not written")
+        return {self.OUTPUT: output}
+
+
+class CreateNormalizedDifferenceVrtAlgorithm(_BaseAlgorithm):
+    POSITIVE = "POSITIVE"
+    NEGATIVE = "NEGATIVE"
+    INDEX_NAME = "INDEX_NAME"
+    OUTPUT = "OUTPUT"
+
+    def name(self):
+        return "create_normalized_difference_vrt"
+
+    def displayName(self):
+        return self.tr("Create Normalized Difference VRT")
+
+    def createInstance(self):
+        return CreateNormalizedDifferenceVrtAlgorithm()
+
+    def initAlgorithm(self, config=None):
+        self._add_parameter(
+            QgsProcessingParameterString(
+                self.POSITIVE, "Positive band COG URL/path (e.g. NIR or Green)"
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterString(
+                self.NEGATIVE, "Negative band COG URL/path (e.g. Red, NIR, or SWIR)"
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterEnum(
+                self.INDEX_NAME,
+                "Index",
+                options=["NDVI", "NDWI", "MNDWI", "NDMI", "NBR", "Custom"],
+                defaultValue=0,
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterFileDestination(
+                self.OUTPUT, "Normalized difference VRT", fileFilter="VRT files (*.vrt)"
+            )
+        )
+
+    def processAlgorithm(self, parameters, context, feedback):
+        from osgeo import gdal
+
+        positive = self._parameter_as_string(parameters, self.POSITIVE, context)
+        negative = self._parameter_as_string(parameters, self.NEGATIVE, context)
+        output = self._parameter_as_file_output(parameters, self.OUTPUT, context)
+        index_options = ["NDVI", "NDWI", "MNDWI", "NDMI", "NBR", "Custom"]
+        index_name = index_options[
+            self._parameter_as_int(parameters, self.INDEX_NAME, context)
+        ]
+
+        if positive == negative:
+            raise QgsProcessingException("Positive and negative bands must differ")
+
+        def source_path(value):
+            return f"/vsicurl/{value}" if value.lower().startswith("http") else value
+
+        positive_path = source_path(positive)
+        negative_path = source_path(negative)
+        config_overrides = {
+            "GDAL_VRT_ENABLE_PYTHON": "YES",
+            "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+            "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": "tif,tiff,TIF,TIFF",
+        }
+        previous_options = {key: gdal.GetConfigOption(key) for key in config_overrides}
+        for key, value in config_overrides.items():
+            gdal.SetConfigOption(key, value)
+        try:
+            source_ds = gdal.Open(positive_path)
+            if source_ds is None:
+                raise QgsProcessingException("Could not open positive band source")
+            width = source_ds.RasterXSize
+            height = source_ds.RasterYSize
+            projection = source_ds.GetProjectionRef() or ""
+            geotransform = source_ds.GetGeoTransform(can_return_null=True)
+            source_ds = None
+
+            negative_ds = gdal.Open(negative_path)
+            if negative_ds is None:
+                raise QgsProcessingException("Could not open negative band source")
+            if (
+                negative_ds.RasterXSize != width
+                or negative_ds.RasterYSize != height
+                or (negative_ds.GetProjectionRef() or "") != projection
+                or negative_ds.GetGeoTransform(can_return_null=True) != geotransform
+            ):
+                negative_ds = None
+                raise QgsProcessingException(
+                    "Positive and negative band sources must share the same "
+                    "size, CRS, and geotransform; reproject/resample them to a "
+                    "common grid first"
+                )
+            negative_ds = None
+        finally:
+            for key, value in previous_options.items():
+                gdal.SetConfigOption(key, value)
+        geotransform_text = (
+            ", ".join(f"{value:.16g}" for value in geotransform) if geotransform else ""
+        )
+
+        def esc(text):
+            return (
+                str(text)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+
+        code = """
+import numpy as np
+
+def normalized_difference(in_ar, out_ar, xoff, yoff, xsize, ysize,
+                          raster_xsize, raster_ysize, buf_radius, gt, **kwargs):
+    positive = in_ar[0].astype("float32")
+    negative = in_ar[1].astype("float32")
+    denominator = positive + negative
+    out_ar[:] = np.where(denominator == 0, 0, (positive - negative) / denominator)
+""".strip()
+
+        lines = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">']
+        if projection:
+            lines.append(f"  <SRS>{esc(projection)}</SRS>")
+        if geotransform_text:
+            lines.append(f"  <GeoTransform>{geotransform_text}</GeoTransform>")
+        lines.extend(
+            [
+                '  <VRTRasterBand dataType="Float32" band="1" subClass="VRTDerivedRasterBand">',
+                f"    <Description>{esc(index_name)}</Description>",
+                "    <PixelFunctionType>normalized_difference</PixelFunctionType>",
+                "    <PixelFunctionLanguage>Python</PixelFunctionLanguage>",
+                f"    <PixelFunctionCode><![CDATA[{code}]]></PixelFunctionCode>",
+            ]
+        )
+        for path in (positive_path, negative_path):
+            lines.extend(
+                [
+                    "    <SimpleSource>",
+                    f'      <SourceFilename relativeToVRT="0">{esc(path)}</SourceFilename>',
+                    "      <SourceBand>1</SourceBand>",
+                    f'      <SrcRect xOff="0" yOff="0" xSize="{width}" ySize="{height}"/>',
+                    f'      <DstRect xOff="0" yOff="0" xSize="{width}" ySize="{height}"/>',
+                    "    </SimpleSource>",
+                ]
+            )
+        lines.extend(["  </VRTRasterBand>", "</VRTDataset>"])
+        with open(output, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        if feedback:
+            feedback.pushInfo(f"Wrote {index_name} VRT: {output}")
+        if not os.path.exists(output):
+            raise QgsProcessingException("Normalized difference VRT was not written")
         return {self.OUTPUT: output}

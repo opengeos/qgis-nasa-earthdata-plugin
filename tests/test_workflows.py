@@ -3,16 +3,26 @@ import json
 
 from nasa_earthdata.core.workflows import (
     build_search_preset,
+    cmr_collection_summary,
+    cmr_collection_url,
     delete_recent_search,
     delete_search_preset,
+    download_queue_state_path,
     granule_export_row,
+    granule_quicklook_links,
     likely_existing_download_files,
+    load_download_queue_state,
     load_search_presets,
     record_recent_search,
+    granules_to_stac_item_collection,
     upsert_search_preset,
+    write_download_queue_state,
     write_download_manifest,
+    write_granules_json,
+    write_results_stac,
     write_results_csv,
     write_results_geojson,
+    write_workflow_bundle,
 )
 
 
@@ -38,6 +48,17 @@ class FakeGranule(dict):
                         ],
                     },
                     "CollectionReference": {"ConceptID": "C2021957657-LPCLOUD"},
+                    "RelatedUrls": [
+                        {
+                            "URL": "https://example.test/preview.jpg",
+                            "Type": "GET RELATED VISUALIZATION",
+                            "Subtype": "BROWSE",
+                        },
+                        {
+                            "URL": "https://doi.org/10.1234/example",
+                            "Description": "DOI landing page",
+                        },
+                    ],
                 },
             }
         )
@@ -182,3 +203,77 @@ def test_download_helpers_detect_existing_files_and_write_manifest(tmp_path):
         ],
     )
     assert "skipped" in manifest.read_text(encoding="utf-8")
+
+
+def test_granules_json_stac_and_workflow_bundle_exports(tmp_path):
+    granule = FakeGranule(["https://example.test/HLS.B04.tif"])
+    granules_json = tmp_path / "granules.json"
+    stac_json = tmp_path / "stac.json"
+    bundle_json = tmp_path / "bundle.json"
+
+    write_granules_json(granules_json, [granule])
+    write_results_stac(
+        stac_json,
+        [granule],
+        {"short_name": "HLSL30", "concept_id": "C2021957657-LPCLOUD"},
+    )
+    stac = granules_to_stac_item_collection([granule], {"short_name": "HLSL30"})
+    write_workflow_bundle(
+        bundle_json,
+        {"name": "test search"},
+        [granule],
+        [granule_export_row(granule, 0)],
+        stac_item_collection=stac,
+        manifest="manifest.csv",
+    )
+
+    assert (
+        json.loads(granules_json.read_text(encoding="utf-8"))[0]["umm"]["GranuleUR"]
+        == "HLS_GRANULE"
+    )
+    assert json.loads(stac_json.read_text(encoding="utf-8"))["stac_version"] == "1.0.0"
+    payload = json.loads(bundle_json.read_text(encoding="utf-8"))
+    assert payload["search"]["name"] == "test search"
+    assert payload["download_manifest"] == "manifest.csv"
+
+
+def test_quicklook_and_cmr_collection_helpers():
+    granule = FakeGranule(["https://example.test/HLS.B04.tif"])
+    assert granule_quicklook_links(granule) == ["https://example.test/preview.jpg"]
+    assert (
+        cmr_collection_url({"concept_id": "C2021957657-LPCLOUD"})
+        == "https://cmr.earthdata.nasa.gov/search/collections.json?concept_id=C2021957657-LPCLOUD"
+    )
+
+    summary = cmr_collection_summary(
+        {
+            "feed": {
+                "entry": [
+                    {
+                        "id": "C1-TEST",
+                        "short_name": "TEST",
+                        "title": "Test Collection",
+                        "cloud_hosted": True,
+                        "links": [{"href": "https://example.test/docs"}],
+                    }
+                ]
+            }
+        }
+    )
+    assert summary["concept_id"] == "C1-TEST"
+    assert summary["cloud_hosted"] is True
+    assert summary["links"] == ["https://example.test/docs"]
+
+
+def test_download_queue_state_round_trip(tmp_path):
+    path = tmp_path / "queue.json"
+    rows = [{"native_id": "HLS", "status": "done", "files": ["HLS.B04.tif"]}]
+
+    write_download_queue_state(path, rows, manifest="manifest.csv", output_dir="/tmp")
+    loaded = load_download_queue_state(path)
+
+    assert loaded["manifest"] == "manifest.csv"
+    assert loaded["rows"][0]["native_id"] == "HLS"
+    assert (
+        download_queue_state_path(FakeSettings()).name == "download_queue_latest.json"
+    )

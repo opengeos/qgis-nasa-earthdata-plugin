@@ -16,6 +16,23 @@ def test_ai_assistant_button_opens_loaded_open_geoagent(monkeypatch):
     plugin.toggle_chat_dock.assert_called_once_with()
 
 
+def test_ai_assistant_hands_context_to_open_geoagent(monkeypatch):
+    plugin = SimpleNamespace(
+        toggle_chat_dock=MagicMock(),
+        _chat_dock=None,
+        set_external_context=MagicMock(),
+    )
+    monkeypatch.setattr(qgis_utils, "plugins", {"open_geoagent": plugin}, raising=False)
+    monkeypatch.setattr(qgis_utils, "available_plugins", [], raising=False)
+
+    NASAEarthdata(MagicMock()).open_ai_assistant(context="current NASA context")
+
+    plugin.toggle_chat_dock.assert_called_once_with()
+    plugin.set_external_context.assert_called_once_with(
+        "NASA Earthdata", "current NASA context"
+    )
+
+
 def test_ai_assistant_button_raises_visible_open_geoagent_chat(monkeypatch):
     dock = MagicMock()
     dock.isVisible.return_value = True

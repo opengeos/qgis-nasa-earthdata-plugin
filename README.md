@@ -11,10 +11,14 @@ A QGIS plugin for searching, visualizing, and downloading NASA Earthdata product
 - **Visualize Data Footprints**: Display search result footprints directly on the QGIS map canvas
 - **Cloud Optimized GeoTIFF (COG) Support**: Stream and visualize COG files directly without downloading
 - **Saved and Recent Searches**: Save reusable search presets, reload recent searches, and delete searches you no longer need
-- **Granule Details and Export**: Inspect selected granule metadata and export search results to CSV or GeoJSON
-- **Download Queue**: Download selected granules with queue status, cancel/retry controls, skip-existing behavior, and manifest output
-- **QGIS Processing Tools**: Run NASA Earthdata search, download, footprint, and RGB COG workflows from the Processing Toolbox and Model Designer
+- **Collection Discovery and Alerts**: Fetch live CMR collection metadata and check saved searches for newly available granules
+- **Quicklook and Citation Links**: Inspect browse/quicklook imagery and DOI/documentation links when granules expose them
+- **Granule Details and Export**: Inspect selected granule metadata and export search results to CSV, GeoJSON, raw JSON, STAC, or a reproducible workflow bundle
+- **Analysis-Ready VRTs**: Build RGB composites and normalized-difference index VRTs such as NDVI, NDWI, MNDWI, NDMI, and NBR from COG bands
+- **Download Queue**: Download selected granules with queue status, cancel/retry controls, skip-existing behavior, manifest output, and a persisted latest-queue snapshot
+- **QGIS Processing Tools**: Run NASA Earthdata search, download, footprint, RGB COG, and normalized-difference VRT workflows from the Processing Toolbox and Model Designer
 - **Earthdata Login Integration**: Seamless authentication with NASA Earthdata Login credentials
+- **OpenGeoAgent Context Handoff**: Send the current dataset, bbox, selected granules, and COG links to OpenGeoAgent when available
 - **Settings Panel**: Configure credentials, download preferences, and plugin options
 
 ## Screenshots
@@ -160,6 +164,8 @@ The search panel is organized into collapsible sections. **Granule Details** and
 - Select a saved preset and click **Load** to restore it.
 - Click **Delete** to remove the selected saved preset.
 - Recent searches are recorded automatically after each search. Select a recent item and click **Load** to restore it, or **Delete** to remove it from the recent list.
+- Click **Collection Info** to fetch live CMR metadata for the selected collection.
+- Click **Check New** to rerun the selected saved/recent search and report granules that are not in the current result set.
 
 Saved presets are stored in `~/.qgis_nasa_earthdata/workflows/search_presets.json` by default.
 
@@ -168,13 +174,18 @@ Saved presets are stored in `~/.qgis_nasa_earthdata/workflows/search_presets.jso
 - **Footprints**: Search results are automatically displayed as footprints on the map
 - **COG Layers**: Select results and click **Display COG** to stream Cloud Optimized GeoTIFFs
 - **RGB Composite**: Select RGB mode and choose red, green, and blue COG channels to create a streamed RGB VRT layer
+- **Spectral Index VRTs**: Expand **Analysis-Ready Index**, choose an index and two COG bands, then click **Create Index VRT**
 - **Downloaded Data**: After downloading, you can add raster files directly to the map
 
 ### Inspecting and Exporting Results
 
 - Select a result row and expand **Granule Details** to view native ID, dataset identity, provider, temporal range, size, COG availability, and data links.
+- Expand **Quicklook and Citation** to view browse imagery and DOI/documentation links when present. Click **Open Quicklook** to open the first browse link in your browser.
 - Click **Export CSV** to write result metadata to `earthdata_results.csv`.
 - Click **Export GeoJSON** to write result metadata and footprints to `earthdata_results.geojson` and add the exported layer to the QGIS project.
+- Click **Export JSON** to write raw granule JSON that can be used by the Processing download tool.
+- Click **Export STAC** to write a STAC ItemCollection.
+- Click **Bundle** to write a reproducible workflow bundle with search parameters, flat result rows, raw granules, STAC content, and the latest download manifest path.
 
 ### Downloading Data
 
@@ -186,15 +197,21 @@ Saved presets are stored in `~/.qgis_nasa_earthdata/workflows/search_presets.jso
 6. Optionally add downloaded files to the map
 
 The downloader skips files that already exist in the destination folder when their filenames match Earthdata link basenames. Each download run writes a CSV manifest in the selected output folder.
+The latest queue state is also written to `~/.qgis_nasa_earthdata/workflows/download_queue_latest.json` by default.
+
+### AI Assistant Context
+
+If OpenGeoAgent is installed, click **AI Assistant** from the NASA Earthdata menu or **AI Context** in the result preview section. The plugin opens OpenGeoAgent and passes the current dataset, bbox, date range, result count, selected granules, and selected COG links when the OpenGeoAgent version exposes a context handoff method. If it does not, the same context is copied to the clipboard.
 
 ### QGIS Processing
 
 The plugin registers a **NASA Earthdata** Processing provider with these algorithms:
 
-- **Search NASA Earthdata**: Search by short name or concept ID and optionally write result footprints to GeoJSON
+- **Search NASA Earthdata**: Search by short name or concept ID and optionally write result footprints to GeoJSON. This tool also supports cloud cover, day/night, provider, version, granule ID, orbit filters, and raw granule JSON output
 - **Download NASA Earthdata Granules**: Download granules from an exported Earthdata JSON input
 - **Add Earthdata Footprints**: Copy/export an Earthdata results GeoJSON as a Processing output
 - **Create RGB COG Layer**: Build an RGB VRT from red, green, and blue COG URLs or paths
+- **Create Normalized Difference VRT**: Build NDVI/NDWI/MNDWI/NDMI/NBR-style VRTs from two COG URLs or local rasters
 
 These tools can be run from **Processing** → **Toolbox** and used in QGIS Model Designer.
 
