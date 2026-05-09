@@ -417,6 +417,366 @@ class AddFootprintsAlgorithm(_BaseAlgorithm):
         return {self.OUTPUT: output or source}
 
 
+class ExportStacAlgorithm(_BaseAlgorithm):
+    GRANULES_JSON = "GRANULES_JSON"
+    SHORT_NAME = "SHORT_NAME"
+    CONCEPT_ID = "CONCEPT_ID"
+    OUTPUT = "OUTPUT"
+
+    def name(self):
+        return "export_nasa_earthdata_stac"
+
+    def displayName(self):
+        return self.tr("Export NASA Earthdata STAC")
+
+    def createInstance(self):
+        return ExportStacAlgorithm()
+
+    def initAlgorithm(self, config=None):
+        self._add_parameter(
+            QgsProcessingParameterFile(
+                self.GRANULES_JSON,
+                "Granules JSON exported from earthaccess",
+                behavior=QgsProcessingParameterFile.File,
+                extension="json",
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterString(self.SHORT_NAME, "Short name", optional=True)
+        )
+        self._add_parameter(
+            QgsProcessingParameterString(self.CONCEPT_ID, "Concept ID", optional=True)
+        )
+        self._add_parameter(
+            QgsProcessingParameterFileDestination(
+                self.OUTPUT,
+                "STAC ItemCollection JSON",
+                fileFilter="JSON files (*.json)",
+            )
+        )
+
+    def processAlgorithm(self, parameters, context, feedback):
+        import json
+
+        from nasa_earthdata.core.workflows import write_results_stac
+
+        granules_json = self._parameter_as_string(
+            parameters, self.GRANULES_JSON, context
+        )
+        short_name = self._parameter_as_string(parameters, self.SHORT_NAME, context)
+        concept_id = self._parameter_as_string(parameters, self.CONCEPT_ID, context)
+        output = self._parameter_as_file_output(parameters, self.OUTPUT, context)
+        with open(granules_json, "r", encoding="utf-8") as f:
+            granules = json.load(f)
+        write_results_stac(
+            output,
+            granules,
+            {"short_name": short_name, "concept_id": concept_id},
+        )
+        if feedback:
+            feedback.pushInfo(f"Wrote STAC ItemCollection: {output}")
+        return {self.OUTPUT: output}
+
+
+class ExportWorkflowBundleAlgorithm(_BaseAlgorithm):
+    GRANULES_JSON = "GRANULES_JSON"
+    SEARCH_JSON = "SEARCH_JSON"
+    MANIFEST = "MANIFEST"
+    OUTPUT = "OUTPUT"
+
+    def name(self):
+        return "export_nasa_earthdata_workflow_bundle"
+
+    def displayName(self):
+        return self.tr("Export NASA Earthdata Workflow Bundle")
+
+    def createInstance(self):
+        return ExportWorkflowBundleAlgorithm()
+
+    def initAlgorithm(self, config=None):
+        self._add_parameter(
+            QgsProcessingParameterFile(
+                self.GRANULES_JSON,
+                "Granules JSON exported from earthaccess",
+                behavior=QgsProcessingParameterFile.File,
+                extension="json",
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterFile(
+                self.SEARCH_JSON,
+                "Optional search preset/workflow JSON",
+                behavior=QgsProcessingParameterFile.File,
+                extension="json",
+                optional=True,
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterString(
+                self.MANIFEST, "Optional download manifest path", optional=True
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterFileDestination(
+                self.OUTPUT,
+                "Workflow bundle JSON",
+                fileFilter="JSON files (*.json)",
+            )
+        )
+
+    def processAlgorithm(self, parameters, context, feedback):
+        import json
+
+        from nasa_earthdata.core.workflows import (
+            granules_to_export_rows,
+            granules_to_stac_item_collection,
+            write_workflow_bundle,
+        )
+
+        granules_json = self._parameter_as_string(
+            parameters, self.GRANULES_JSON, context
+        )
+        search_json = self._parameter_as_string(parameters, self.SEARCH_JSON, context)
+        manifest = self._parameter_as_string(parameters, self.MANIFEST, context)
+        output = self._parameter_as_file_output(parameters, self.OUTPUT, context)
+        with open(granules_json, "r", encoding="utf-8") as f:
+            granules = json.load(f)
+
+        search = {}
+        if search_json:
+            with open(search_json, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            search = payload.get("search", payload) if isinstance(payload, dict) else {}
+
+        dataset = search.get("dataset", {}) if isinstance(search, dict) else {}
+        rows = granules_to_export_rows(granules, dataset)
+        stac = granules_to_stac_item_collection(granules, dataset)
+        write_workflow_bundle(
+            output,
+            search,
+            granules,
+            rows,
+            stac_item_collection=stac,
+            manifest=manifest,
+        )
+        if feedback:
+            feedback.pushInfo(f"Wrote workflow bundle: {output}")
+        return {self.OUTPUT: output}
+
+
+class CollectionInfoAlgorithm(_BaseAlgorithm):
+    SHORT_NAME = "SHORT_NAME"
+    CONCEPT_ID = "CONCEPT_ID"
+    OUTPUT = "OUTPUT"
+
+    def name(self):
+        return "nasa_earthdata_collection_info"
+
+    def displayName(self):
+        return self.tr("NASA Earthdata Collection Info")
+
+    def createInstance(self):
+        return CollectionInfoAlgorithm()
+
+    def initAlgorithm(self, config=None):
+        self._add_parameter(
+            QgsProcessingParameterString(self.SHORT_NAME, "Short name", optional=True)
+        )
+        self._add_parameter(
+            QgsProcessingParameterString(self.CONCEPT_ID, "Concept ID", optional=True)
+        )
+        self._add_parameter(
+            QgsProcessingParameterFileDestination(
+                self.OUTPUT,
+                "Collection metadata summary JSON",
+                fileFilter="JSON files (*.json)",
+            )
+        )
+
+    def processAlgorithm(self, parameters, context, feedback):
+        import json
+        from pathlib import Path
+
+        from nasa_earthdata.core.net import https_only_urlopen
+        from nasa_earthdata.core.workflows import (
+            cmr_collection_summary,
+            cmr_collection_url,
+        )
+
+        short_name = self._parameter_as_string(parameters, self.SHORT_NAME, context)
+        concept_id = self._parameter_as_string(parameters, self.CONCEPT_ID, context)
+        output = self._parameter_as_file_output(parameters, self.OUTPUT, context)
+        url = cmr_collection_url({"short_name": short_name, "concept_id": concept_id})
+        if not url:
+            raise QgsProcessingException("Short name or concept ID is required")
+        with https_only_urlopen(url, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        summary = cmr_collection_summary(payload)
+        if not summary:
+            raise QgsProcessingException("No CMR collection metadata found")
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        with open(output, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, sort_keys=True)
+        if feedback:
+            feedback.pushInfo(f"Wrote collection metadata summary: {output}")
+        return {self.OUTPUT: output}
+
+
+class CheckNewGranulesAlgorithm(SearchEarthdataAlgorithm):
+    BASELINE_JSON = "BASELINE_JSON"
+    NEW_GRANULES_JSON = "NEW_GRANULES_JSON"
+    NEW_COUNT = "NEW_COUNT"
+
+    def name(self):
+        return "check_new_nasa_earthdata_granules"
+
+    def displayName(self):
+        return self.tr("Check New NASA Earthdata Granules")
+
+    def createInstance(self):
+        return CheckNewGranulesAlgorithm()
+
+    def initAlgorithm(self, config=None):
+        super().initAlgorithm(config)
+        self._add_parameter(
+            QgsProcessingParameterFile(
+                self.BASELINE_JSON,
+                "Baseline granules JSON",
+                behavior=QgsProcessingParameterFile.File,
+                extension="json",
+            )
+        )
+        self._add_parameter(
+            QgsProcessingParameterFileDestination(
+                self.NEW_GRANULES_JSON,
+                "New granules JSON",
+                fileFilter="JSON files (*.json)",
+                optional=True,
+            )
+        )
+        if QgsProcessingOutputNumber is not None:
+            self._add_output(
+                QgsProcessingOutputNumber(self.NEW_COUNT, "Number of new granules")
+            )
+
+    def processAlgorithm(self, parameters, context, feedback):
+        import json
+
+        from nasa_earthdata.core.venv_manager import import_earthaccess
+        from nasa_earthdata.core.workflows import (
+            granule_native_id,
+            granules_to_export_rows,
+            write_granules_json,
+            write_results_geojson,
+        )
+
+        short_name = self._parameter_as_string(parameters, self.SHORT_NAME, context)
+        concept_id = self._parameter_as_string(parameters, self.CONCEPT_ID, context)
+        bbox_text = self._parameter_as_string(parameters, self.BBOX, context)
+        start_date = self._parameter_as_string(parameters, self.START_DATE, context)
+        end_date = self._parameter_as_string(parameters, self.END_DATE, context)
+        max_items = self._parameter_as_int(parameters, self.MAX_ITEMS, context)
+        cloud_min = self._parameter_as_int(parameters, self.CLOUD_MIN, context)
+        cloud_max = self._parameter_as_int(parameters, self.CLOUD_MAX, context)
+        day_night_index = self._parameter_as_int(parameters, self.DAY_NIGHT, context)
+        provider = self._parameter_as_string(parameters, self.PROVIDER, context)
+        version = self._parameter_as_string(parameters, self.VERSION, context)
+        granule_id = self._parameter_as_string(parameters, self.GRANULE_ID, context)
+        orbit_min = self._parameter_as_int(parameters, self.ORBIT_MIN, context)
+        orbit_max = self._parameter_as_int(parameters, self.ORBIT_MAX, context)
+        baseline_json = self._parameter_as_string(
+            parameters, self.BASELINE_JSON, context
+        )
+
+        bbox = None
+        if bbox_text:
+            parts = [float(item.strip()) for item in bbox_text.split(",")]
+            if len(parts) != 4:
+                raise QgsProcessingException("Bounding box must have 4 values")
+            bbox = tuple(parts)
+
+        if not concept_id and not short_name:
+            raise QgsProcessingException("Short name or concept ID is required")
+        kwargs = (
+            {"concept_id": concept_id} if concept_id else {"short_name": short_name}
+        )
+        if bbox is not None:
+            kwargs["bounding_box"] = bbox
+        if start_date and end_date:
+            kwargs["temporal"] = (start_date, end_date)
+        if cloud_min > 0 or cloud_max < 100:
+            kwargs["cloud_cover"] = (cloud_min, cloud_max)
+        day_night = [None, "day", "night", "unspecified"][day_night_index]
+        if day_night is not None:
+            kwargs["day_night_flag"] = day_night
+        if provider:
+            kwargs["provider"] = provider
+        if version:
+            kwargs["version"] = version
+        if granule_id:
+            kwargs["granule_ur"] = granule_id
+        if orbit_min or orbit_max:
+            kwargs["orbit_number"] = (
+                (orbit_min, orbit_max)
+                if orbit_min and orbit_max
+                else orbit_min or orbit_max
+            )
+
+        with open(baseline_json, "r", encoding="utf-8") as f:
+            baseline = json.load(f)
+        if isinstance(baseline, dict):
+            baseline = baseline.get("granules", baseline.get("results"))
+        if baseline is None:
+            baseline = []
+        if not isinstance(baseline, list):
+            raise QgsProcessingException(
+                "Baseline JSON must be a list of granules or contain a "
+                "'granules' list (e.g. earthaccess granules JSON)."
+            )
+        baseline_ids = {
+            granule_native_id(granule, f"Item {index + 1}")
+            for index, granule in enumerate(baseline)
+        }
+
+        earthaccess = import_earthaccess()
+        granules = earthaccess.search_data(count=max_items, **kwargs)
+        output = self._parameter_as_file_output(parameters, self.OUTPUT, context)
+        if output:
+            rows = granules_to_export_rows(
+                granules,
+                {"short_name": short_name, "concept_id": concept_id},
+            )
+            write_results_geojson(output, rows, None)
+        output_all_json = self._parameter_as_file_output(
+            parameters, self.OUTPUT_JSON, context
+        )
+        if output_all_json:
+            write_granules_json(output_all_json, granules)
+
+        new_granules = []
+        for index, granule in enumerate(granules or []):
+            native_id = granule_native_id(granule, f"Item {index + 1}")
+            if native_id not in baseline_ids:
+                new_granules.append(granule)
+
+        output_json = self._parameter_as_file_output(
+            parameters, self.NEW_GRANULES_JSON, context
+        )
+        if output_json:
+            write_granules_json(output_json, new_granules)
+        if feedback:
+            feedback.pushInfo(
+                f"Found {len(new_granules)} new granule(s) out of {len(granules or [])}"
+            )
+        return {
+            self.OUTPUT: output,
+            self.OUTPUT_JSON: output_all_json,
+            self.NEW_GRANULES_JSON: output_json,
+            self.NEW_COUNT: len(new_granules),
+            self.COUNT: len(granules or []),
+        }
+
+
 class CreateRgbCogLayerAlgorithm(_BaseAlgorithm):
     RED = "RED"
     GREEN = "GREEN"

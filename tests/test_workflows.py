@@ -10,6 +10,7 @@ from nasa_earthdata.core.workflows import (
     download_queue_state_path,
     granule_export_row,
     granule_quicklook_links,
+    granule_inaccessible_quicklook_links,
     likely_existing_download_files,
     load_download_queue_state,
     load_search_presets,
@@ -51,6 +52,11 @@ class FakeGranule(dict):
                     "RelatedUrls": [
                         {
                             "URL": "https://example.test/preview.jpg",
+                            "Type": "GET RELATED VISUALIZATION",
+                            "Subtype": "BROWSE",
+                        },
+                        {
+                            "URL": "s3://example-bucket/preview.jpg",
                             "Type": "GET RELATED VISUALIZATION",
                             "Subtype": "BROWSE",
                         },
@@ -240,6 +246,9 @@ def test_granules_json_stac_and_workflow_bundle_exports(tmp_path):
 def test_quicklook_and_cmr_collection_helpers():
     granule = FakeGranule(["https://example.test/HLS.B04.tif"])
     assert granule_quicklook_links(granule) == ["https://example.test/preview.jpg"]
+    assert granule_inaccessible_quicklook_links(granule) == [
+        "s3://example-bucket/preview.jpg"
+    ]
     assert (
         cmr_collection_url({"concept_id": "C2021957657-LPCLOUD"})
         == "https://cmr.earthdata.nasa.gov/search/collections.json?concept_id=C2021957657-LPCLOUD"

@@ -1,5 +1,9 @@
 from nasa_earthdata.processing.algorithms import (
+    CheckNewGranulesAlgorithm,
+    CollectionInfoAlgorithm,
     CreateNormalizedDifferenceVrtAlgorithm,
+    ExportStacAlgorithm,
+    ExportWorkflowBundleAlgorithm,
     SearchEarthdataAlgorithm,
 )
 
@@ -16,3 +20,13 @@ def test_normalized_difference_algorithm_identity():
 
     assert algorithm.name() == "create_normalized_difference_vrt"
     assert algorithm.displayName() == "Create Normalized Difference VRT"
+
+
+def test_new_processing_algorithm_identities():
+    assert ExportStacAlgorithm().name() == "export_nasa_earthdata_stac"
+    assert (
+        ExportWorkflowBundleAlgorithm().name()
+        == "export_nasa_earthdata_workflow_bundle"
+    )
+    assert CollectionInfoAlgorithm().name() == "nasa_earthdata_collection_info"
+    assert CheckNewGranulesAlgorithm().name() == "check_new_nasa_earthdata_granules"
