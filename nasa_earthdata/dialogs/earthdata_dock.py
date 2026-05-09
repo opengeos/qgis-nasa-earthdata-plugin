@@ -880,9 +880,7 @@ class IndexVrtWorker(QThread):
         return f"/vsicurl/{value}" if value.lower().startswith("http") else value
 
     def _escape_xml(self, text):
-        return (
-            str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        )
+        return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     def _write_normalized_difference_vrt(self):
         """Write a VRT that computes (positive - negative) / (positive + negative)."""
@@ -903,9 +901,7 @@ class IndexVrtWorker(QThread):
         projection = source_ds.GetProjectionRef() or ""
         geotransform = source_ds.GetGeoTransform(can_return_null=True)
         geotransform_text = (
-            ", ".join(f"{value:.16g}" for value in geotransform)
-            if geotransform
-            else ""
+            ", ".join(f"{value:.16g}" for value in geotransform) if geotransform else ""
         )
         source_ds = None
 
