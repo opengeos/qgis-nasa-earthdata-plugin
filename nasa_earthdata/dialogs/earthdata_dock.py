@@ -1130,6 +1130,12 @@ class EarthdataDockWidget(QDockWidget):
         self.use_extent_btn = QPushButton("Use Map Extent")
         self.use_extent_btn.clicked.connect(self._use_map_extent)
         bbox_btn_layout.addWidget(self.use_extent_btn)
+        self.use_layer_aoi_btn = QPushButton("Use Layer AOI")
+        self.use_layer_aoi_btn.setToolTip(
+            "Use the active vector layer selection, or the active layer extent, as the search bounding box"
+        )
+        self.use_layer_aoi_btn.clicked.connect(self._use_active_layer_aoi)
+        bbox_btn_layout.addWidget(self.use_layer_aoi_btn)
         self.draw_bbox_btn = QPushButton("Draw Bbox")
         self.draw_bbox_btn.setCheckable(True)
         self.draw_bbox_btn.toggled.connect(self._toggle_draw_bbox)
@@ -1326,9 +1332,24 @@ class EarthdataDockWidget(QDockWidget):
         results_layout = QVBoxLayout(results_group)
 
         # Results table
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("Filter:"))
+        self.result_filter_input = QLineEdit()
+        self.result_filter_input.setPlaceholderText(
+            "Filter results by ID, date, provider, cloud, day/night, or COG count..."
+        )
+        self.result_filter_input.textChanged.connect(self._filter_result_rows)
+        filter_layout.addWidget(self.result_filter_input, 1)
+        self.clear_result_filter_btn = QPushButton("Clear")
+        self.clear_result_filter_btn.clicked.connect(self.result_filter_input.clear)
+        filter_layout.addWidget(self.clear_result_filter_btn)
+        results_layout.addLayout(filter_layout)
+
         self.results_table = QTableWidget()
-        self.results_table.setColumnCount(3)
-        self.results_table.setHorizontalHeaderLabels(["ID", "Date", "Size"])
+        self.results_table.setColumnCount(7)
+        self.results_table.setHorizontalHeaderLabels(
+            ["ID", "Date", "Size", "Provider", "Cloud", "Day/Night", "COGs"]
+        )
         # Start with practical widths, but keep all columns user-resizable.
         results_header = self.results_table.horizontalHeader()
         results_header.setSectionsClickable(True)
@@ -1387,6 +1408,10 @@ class EarthdataDockWidget(QDockWidget):
         self.open_quicklook_btn.setEnabled(False)
         self.open_quicklook_btn.clicked.connect(self._open_selected_quicklook)
         preview_btn_layout.addWidget(self.open_quicklook_btn)
+        self.open_gallery_btn = QPushButton("Gallery")
+        self.open_gallery_btn.setEnabled(False)
+        self.open_gallery_btn.clicked.connect(self._open_quicklook_gallery)
+        preview_btn_layout.addWidget(self.open_gallery_btn)
         self.copy_context_btn = QPushButton("AI Context")
         self.copy_context_btn.setEnabled(False)
         self.copy_context_btn.clicked.connect(self._send_context_to_ai_assistant)
@@ -1919,6 +1944,8 @@ class EarthdataDockWidget(QDockWidget):
     def _clear_results(self):
         """Clear search results without resetting other settings."""
         self.results_table.setRowCount(0)
+        if hasattr(self, "result_filter_input"):
+            self.result_filter_input.clear()
         self.results_label.setText("No search performed yet")
         self.display_btn.setEnabled(False)
         self.download_btn.setEnabled(False)
@@ -1930,6 +1957,7 @@ class EarthdataDockWidget(QDockWidget):
         self.export_bundle_btn.setEnabled(False)
         self.copy_context_btn.setEnabled(False)
         self.open_quicklook_btn.setEnabled(False)
+        self.open_gallery_btn.setEnabled(False)
         self.details_text.clear()
         self.preview_text.clear()
         self.cog_list.clear()
@@ -1959,6 +1987,55 @@ class EarthdataDockWidget(QDockWidget):
 
         bbox_str = f"{extent.xMinimum():.4f}, {extent.yMinimum():.4f}, {extent.xMaximum():.4f}, {extent.yMaximum():.4f}"
         self.bbox_input.setText(bbox_str)
+
+    def _use_active_layer_aoi(self):
+        """Set bbox from the active vector layer selection or layer extent."""
+        try:
+            layer = self.iface.activeLayer()
+        except Exception:
+            layer = None
+        if layer is None:
+            QMessageBox.information(
+                self, "Use Layer AOI", "Select an active vector layer first."
+            )
+            return
+
+        if not isinstance(layer, QgsVectorLayer):
+            QMessageBox.information(
+                self, "Use Layer AOI", "The active layer must be a vector layer."
+            )
+            return
+
+        try:
+            selected_features = list(layer.selectedFeatures())
+        except Exception:
+            selected_features = []
+
+        if selected_features:
+            extent = selected_features[0].geometry().boundingBox()
+            for feature in selected_features[1:]:
+                extent.combineExtentWith(feature.geometry().boundingBox())
+            source = f"{len(selected_features)} selected feature(s)"
+        else:
+            extent = layer.extent()
+            source = "active layer extent"
+
+        try:
+            layer_crs = layer.crs()
+            if layer_crs.authid() != "EPSG:4326":
+                transform = QgsCoordinateTransform(
+                    layer_crs,
+                    QgsCoordinateReferenceSystem("EPSG:4326"),
+                    QgsProject.instance(),
+                )
+                extent = transform.transformBoundingBox(extent)
+            bbox_str = f"{extent.xMinimum():.4f}, {extent.yMinimum():.4f}, {extent.xMaximum():.4f}, {extent.yMaximum():.4f}"
+            self.bbox_input.setText(bbox_str)
+            self._log(f"Bounding box set from {source}: {layer.name()}")
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Use Layer AOI", f"Could not use active layer AOI:\n{e}"
+            )
 
     def _extent_to_wgs84_bbox_text(self, extent):
         """Convert a map-canvas extent to formatted WGS84 bbox text."""
@@ -2245,32 +2322,29 @@ class EarthdataDockWidget(QDockWidget):
         self.results_table.setRowCount(len(results))
         for i, granule in enumerate(results):
             try:
-                native_id = granule.get("meta", {}).get("native-id", f"Item {i+1}")
-                # Get date from time range
-                time_start = (
-                    granule.get("umm", {})
-                    .get("TemporalExtent", {})
-                    .get("RangeDateTime", {})
-                    .get("BeginningDateTime", "N/A")
+                row = granule_export_row(
+                    granule, i, self.dataset_combo.currentData() or {}
                 )
-                if time_start != "N/A":
-                    time_start = time_start[:10]  # Just the date part
-
-                # Estimate size
-                size_display = "N/A"
-                size_bytes = 0  # For sorting
-                data_granule = granule.get("umm", {}).get("DataGranule", {})
-                if "ArchiveAndDistributionInformation" in data_granule:
-                    for info in data_granule["ArchiveAndDistributionInformation"]:
-                        if "SizeInBytes" in info:
-                            size_bytes = info["SizeInBytes"]
-                            if size_bytes > 1e9:
-                                size_display = f"{size_bytes / 1e9:.1f} GB"
-                            elif size_bytes > 1e6:
-                                size_display = f"{size_bytes / 1e6:.1f} MB"
-                            else:
-                                size_display = f"{size_bytes / 1e3:.1f} KB"
-                            break
+                native_id = row.get("native_id") or f"Item {i + 1}"
+                time_start = (row.get("temporal_start") or "N/A")[:10]
+                size_display = row.get("size_display") or "N/A"
+                size_bytes = row.get("size_bytes") or 0
+                provider = row.get("provider") or row.get("dataset_provider") or ""
+                cloud_cover = row.get("cloud_cover")
+                if cloud_cover in (None, ""):
+                    cloud_display = ""
+                    cloud_sort = -1
+                else:
+                    try:
+                        cloud_sort = float(cloud_cover)
+                        cloud_display = f"{cloud_sort:g}%"
+                    except (TypeError, ValueError):
+                        cloud_sort = -1
+                        cloud_display = str(cloud_cover)
+                day_night = row.get("day_night") or ""
+                cog_count = len(
+                    [link for link in row.get("cog_links", "").splitlines() if link]
+                )
 
                 # Create items with tooltips for full text
                 id_item = QTableWidgetItem(_compact_result_id(native_id))
@@ -2298,6 +2372,24 @@ class EarthdataDockWidget(QDockWidget):
                     Qt.ItemDataRole.UserRole, size_bytes
                 )  # Store raw value for sorting
                 self.results_table.setItem(i, 2, size_item)
+
+                provider_item = QTableWidgetItem(str(provider))
+                provider_item.setToolTip(str(provider))
+                self.results_table.setItem(i, 3, provider_item)
+
+                cloud_item = NumericTableWidgetItem(str(cloud_display))
+                cloud_item.setData(Qt.ItemDataRole.UserRole, cloud_sort)
+                cloud_item.setToolTip(str(cloud_display))
+                self.results_table.setItem(i, 4, cloud_item)
+
+                daynight_item = QTableWidgetItem(str(day_night))
+                daynight_item.setToolTip(str(day_night))
+                self.results_table.setItem(i, 5, daynight_item)
+
+                cogs_item = NumericTableWidgetItem(str(cog_count))
+                cogs_item.setData(Qt.ItemDataRole.UserRole, cog_count)
+                cogs_item.setToolTip(f"{cog_count} COG/TIFF link(s)")
+                self.results_table.setItem(i, 6, cogs_item)
             except Exception:
                 id_item = QTableWidgetItem(f"Item {i+1}")
                 id_item.setTextAlignment(
@@ -2318,10 +2410,13 @@ class EarthdataDockWidget(QDockWidget):
                 )
                 size_item.setData(Qt.ItemDataRole.UserRole, 0)  # Store 0 for N/A
                 self.results_table.setItem(i, 2, size_item)
+                for column in range(3, self.results_table.columnCount()):
+                    self.results_table.setItem(i, column, QTableWidgetItem(""))
 
         # Re-enable sorting after population
         self.results_table.setSortingEnabled(True)
         self._set_default_results_column_widths()
+        self._filter_result_rows()
 
         # Add footprints to map
         self._add_footprints(gdf)
@@ -2705,29 +2800,68 @@ class EarthdataDockWidget(QDockWidget):
         self.details_text.setPlainText("\n".join(str(line) for line in lines))
 
     def _update_quicklook_preview(self):
-        """Update quicklook/citation links for the selected granule."""
+        """Update quicklook/citation links for selected granules."""
         if not self._search_results:
             self.preview_text.clear()
             self.open_quicklook_btn.setEnabled(False)
+            self.open_gallery_btn.setEnabled(False)
             return
 
-        result_index = self._first_selected_result_index()
-        if result_index < 0 or result_index >= len(self._search_results):
+        selected_indices = self._get_selected_result_indices()
+        if not selected_indices:
+            first_index = self._first_selected_result_index()
+            selected_indices = [first_index] if first_index >= 0 else []
+        selected_indices = [
+            index
+            for index in selected_indices
+            if 0 <= index < len(self._search_results)
+        ]
+        if not selected_indices:
             self.preview_text.setPlainText("Select a result to inspect preview links.")
             self.open_quicklook_btn.setEnabled(False)
+            self.open_gallery_btn.setEnabled(False)
             return
 
-        granule = self._search_results[result_index]
-        quicklooks = granule_quicklook_links(granule)
-        citations = granule_citation_links(granule)
-        html_parts = [
-            "<h4>Quicklook / browse links</h4>",
-            self._link_list_html(quicklooks, "No quicklook links found."),
-            "<h4>Citation / documentation links</h4>",
-            self._link_list_html(citations, "No citation links found."),
-        ]
+        html_parts = ["<h4>Quicklook / browse gallery</h4>"]
+        all_quicklooks = []
+        all_citations = []
+        for result_index in selected_indices[:12]:
+            granule = self._search_results[result_index]
+            native_id = granule_native_id(granule, f"Item {result_index + 1}")
+            quicklooks = granule_quicklook_links(granule)
+            citations = granule_citation_links(granule)
+            all_quicklooks.extend(quicklooks)
+            all_citations.extend(citations)
+            html_parts.append(
+                f"<p><b>{html.escape(_compact_result_id(native_id))}</b></p>"
+            )
+            if quicklooks:
+                html_parts.append("<div>")
+                for url in quicklooks[:4]:
+                    escaped = html.escape(url, quote=True)
+                    html_parts.append(
+                        f'<a href="{escaped}"><img src="{escaped}" '
+                        'height="96" style="margin:4px;"/></a>'
+                    )
+                html_parts.append("</div>")
+                html_parts.append(self._link_list_html(quicklooks, ""))
+            else:
+                html_parts.append("<p>No quicklook links found.</p>")
+            if citations:
+                html_parts.append("<p>Citation / documentation:</p>")
+                html_parts.append(self._link_list_html(citations, ""))
+
+        if len(selected_indices) > 12:
+            html_parts.append(
+                f"<p>Showing previews for 12 of {len(selected_indices)} selected granules.</p>"
+            )
+        unique_citations = list(dict.fromkeys(all_citations))
+        if unique_citations:
+            html_parts.append("<h4>All Citation / documentation links</h4>")
+            html_parts.append(self._link_list_html(unique_citations, ""))
         self.preview_text.setHtml("".join(html_parts))
-        self.open_quicklook_btn.setEnabled(bool(quicklooks))
+        self.open_quicklook_btn.setEnabled(bool(all_quicklooks))
+        self.open_gallery_btn.setEnabled(bool(all_quicklooks))
 
     def _link_html(self, url, label=None):
         """Return an escaped external-link anchor for display widgets."""
@@ -2755,6 +2889,54 @@ class EarthdataDockWidget(QDockWidget):
         quicklooks = granule_quicklook_links(self._search_results[result_index])
         if quicklooks:
             webbrowser.open(quicklooks[0])
+
+    def _quicklook_gallery_html(self):
+        """Return an HTML quicklook gallery for selected or current results."""
+        if not self._search_results:
+            return "<p>No search results available.</p>"
+        selected_indices = self._get_selected_result_indices()
+        if not selected_indices:
+            selected_indices = list(range(min(24, len(self._search_results))))
+
+        html_parts = ["<html><body><h3>NASA Earthdata Quicklook Gallery</h3>"]
+        for result_index in selected_indices[:48]:
+            if result_index < 0 or result_index >= len(self._search_results):
+                continue
+            granule = self._search_results[result_index]
+            native_id = granule_native_id(granule, f"Item {result_index + 1}")
+            quicklooks = granule_quicklook_links(granule)
+            if not quicklooks:
+                continue
+            html_parts.append(
+                '<div style="margin-bottom:14px;">'
+                f"<h4>{html.escape(str(native_id))}</h4>"
+            )
+            for url in quicklooks[:6]:
+                escaped = html.escape(url, quote=True)
+                html_parts.append(
+                    f'<a href="{escaped}"><img src="{escaped}" '
+                    'height="180" style="margin:6px;"/></a>'
+                )
+            html_parts.append("</div>")
+        html_parts.append("</body></html>")
+        return "".join(html_parts)
+
+    def _open_quicklook_gallery(self):
+        """Open a scrollable dialog with selected quicklook images."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Quicklook Gallery")
+        dialog.resize(820, 620)
+        layout = QVBoxLayout(dialog)
+        browser = QTextBrowser(dialog)
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(self._quicklook_gallery_html())
+        layout.addWidget(browser)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        exec_dialog = getattr(dialog, "exec", None) or getattr(dialog, "exec_", None)
+        if exec_dialog is not None:
+            exec_dialog()
 
     def ai_context_summary(self):
         """Return a compact text summary of current NASA Earthdata context."""
@@ -3213,7 +3395,7 @@ class EarthdataDockWidget(QDockWidget):
         )
 
     def _set_default_results_column_widths(self):
-        """Set initial Date/Size widths and make ID fill the remaining space."""
+        """Set initial detail widths and make ID fill the remaining space."""
         if self._adjusting_results_columns:
             return
 
@@ -3221,13 +3403,17 @@ class EarthdataDockWidget(QDockWidget):
         try:
             self.results_table.setColumnWidth(1, 90)
             self.results_table.setColumnWidth(2, 80)
+            self.results_table.setColumnWidth(3, 80)
+            self.results_table.setColumnWidth(4, 70)
+            self.results_table.setColumnWidth(5, 80)
+            self.results_table.setColumnWidth(6, 55)
         finally:
             self._adjusting_results_columns = False
 
         self._fit_results_columns_to_width()
 
     def _fit_results_columns_to_width(self):
-        """Make the ID column fill leftover width after Date and Size columns."""
+        """Make the ID column fill leftover width after detail columns."""
         if self._adjusting_results_columns:
             return
 
@@ -3239,9 +3425,12 @@ class EarthdataDockWidget(QDockWidget):
 
         header = self.results_table.horizontalHeader()
         min_width = max(45, header.minimumSectionSize())
-        date_width = max(min_width, self.results_table.columnWidth(1) or 90)
-        size_width = max(min_width, self.results_table.columnWidth(2) or 80)
-        id_width = max(180, viewport_width - date_width - size_width)
+        detail_width = 0
+        for column, fallback in ((1, 90), (2, 80), (3, 80), (4, 70), (5, 80), (6, 55)):
+            detail_width += max(
+                min_width, self.results_table.columnWidth(column) or fallback
+            )
+        id_width = max(180, viewport_width - detail_width)
 
         self._adjusting_results_columns = True
         try:
@@ -3250,9 +3439,28 @@ class EarthdataDockWidget(QDockWidget):
             self._adjusting_results_columns = False
 
     def _on_results_section_resized(self, logical_index, _old_size, _new_size):
-        """Keep ID as the fill column when Date or Size is resized."""
-        if logical_index in (1, 2) and not self._adjusting_results_columns:
+        """Keep ID as the fill column when detail columns are resized."""
+        if logical_index != 0 and not self._adjusting_results_columns:
             QTimer.singleShot(0, self._fit_results_columns_to_width)
+
+    def _filter_result_rows(self):
+        """Hide result rows that do not match the result filter text."""
+        if not hasattr(self, "result_filter_input"):
+            return
+        text = self.result_filter_input.text().strip().lower()
+        for row in range(self.results_table.rowCount()):
+            if not text:
+                self.results_table.setRowHidden(row, False)
+                continue
+            values = []
+            for column in range(self.results_table.columnCount()):
+                item = self.results_table.item(row, column)
+                if item is None:
+                    continue
+                values.append(item.text())
+                values.append(item.toolTip())
+            haystack = " ".join(values).lower()
+            self.results_table.setRowHidden(row, text not in haystack)
 
     def _set_default_download_column_widths(self):
         """Set initial queue column widths and make Granule fill remaining space."""

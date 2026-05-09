@@ -12,9 +12,13 @@ if not isinstance(QgsProcessingProvider, type):
 
 from .algorithms import (
     AddFootprintsAlgorithm,
+    CheckNewGranulesAlgorithm,
+    CollectionInfoAlgorithm,
     CreateNormalizedDifferenceVrtAlgorithm,
     CreateRgbCogLayerAlgorithm,
     DownloadGranulesAlgorithm,
+    ExportStacAlgorithm,
+    ExportWorkflowBundleAlgorithm,
     SearchEarthdataAlgorithm,
 )
 
@@ -43,6 +47,10 @@ class NASAEarthdataProcessingProvider(QgsProcessingProvider):
             SearchEarthdataAlgorithm(),
             DownloadGranulesAlgorithm(),
             AddFootprintsAlgorithm(),
+            ExportStacAlgorithm(),
+            ExportWorkflowBundleAlgorithm(),
+            CollectionInfoAlgorithm(),
+            CheckNewGranulesAlgorithm(),
             CreateRgbCogLayerAlgorithm(),
             CreateNormalizedDifferenceVrtAlgorithm(),
         ):

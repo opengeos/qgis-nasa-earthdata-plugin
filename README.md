@@ -12,11 +12,12 @@ A QGIS plugin for searching, visualizing, and downloading NASA Earthdata product
 - **Cloud Optimized GeoTIFF (COG) Support**: Stream and visualize COG files directly without downloading
 - **Saved and Recent Searches**: Save reusable search presets, reload recent searches, and delete searches you no longer need
 - **Collection Discovery and Alerts**: Fetch live CMR collection metadata and check saved searches for newly available granules
-- **Quicklook and Citation Links**: Inspect browse/quicklook imagery and DOI/documentation links when granules expose them
+- **Quicklook Gallery and Citation Links**: Inspect inline browse/quicklook thumbnails, open a gallery dialog, and browse DOI/documentation links when granules expose them
 - **Granule Details and Export**: Inspect selected granule metadata and export search results to CSV, GeoJSON, raw JSON, STAC, or a reproducible workflow bundle
+- **Richer Result Filtering**: Filter result rows by granule ID, date, provider, cloud cover, day/night flag, size, or COG count
 - **Analysis-Ready VRTs**: Build RGB composites and normalized-difference index VRTs such as NDVI, NDWI, MNDWI, NDMI, and NBR from COG bands
 - **Download Queue**: Download selected granules with queue status, cancel/retry controls, skip-existing behavior, manifest output, and a persisted latest-queue snapshot
-- **QGIS Processing Tools**: Run NASA Earthdata search, download, footprint, RGB COG, and normalized-difference VRT workflows from the Processing Toolbox and Model Designer
+- **QGIS Processing Tools**: Run NASA Earthdata search, download, footprint, STAC export, workflow bundle, collection info, new-granule check, RGB COG, and normalized-difference VRT workflows from the Processing Toolbox and Model Designer
 - **Earthdata Login Integration**: Seamless authentication with NASA Earthdata Login credentials
 - **OpenGeoAgent Context Handoff**: Send the current dataset, bbox, selected granules, and COG links to OpenGeoAgent when available
 - **Settings Panel**: Configure credentials, download preferences, and plugin options
@@ -151,6 +152,7 @@ Alternatively, you can configure credentials via:
 2. Filter datasets by keyword (optional)
 3. Select a dataset from the dropdown. By default, the plugin selects `HLSL30` with concept ID `C2021957657-LPCLOUD` when it is available.
 4. Set the bounding box (or use current map extent)
+   - Click **Use Layer AOI** to use the active vector layer selection, or the active vector layer extent when no features are selected, as the search bounding box.
 5. Set the date range
 6. Click **Search**
 
@@ -179,8 +181,9 @@ Saved presets are stored in `~/.qgis_nasa_earthdata/workflows/search_presets.jso
 
 ### Inspecting and Exporting Results
 
+- Type in the **Filter** box above the result table to narrow results by ID, date, provider, cloud cover, day/night flag, size, or COG count.
 - Select a result row and expand **Granule Details** to view native ID, dataset identity, provider, temporal range, size, COG availability, and data links.
-- Expand **Quicklook and Citation** to view browse imagery and DOI/documentation links when present. Click **Open Quicklook** to open the first browse link in your browser.
+- Expand **Quicklook and Citation** to view inline browse imagery and DOI/documentation links when present. Click **Open Quicklook** to open the first browse link in your browser, or **Gallery** to compare quicklooks for selected rows.
 - Click **Export CSV** to write result metadata to `earthdata_results.csv`.
 - Click **Export GeoJSON** to write result metadata and footprints to `earthdata_results.geojson` and add the exported layer to the QGIS project.
 - Click **Export JSON** to write raw granule JSON that can be used by the Processing download tool.
@@ -210,6 +213,10 @@ The plugin registers a **NASA Earthdata** Processing provider with these algorit
 - **Search NASA Earthdata**: Search by short name or concept ID and optionally write result footprints to GeoJSON. This tool also supports cloud cover, day/night, provider, version, granule ID, orbit filters, and raw granule JSON output
 - **Download NASA Earthdata Granules**: Download granules from an exported Earthdata JSON input
 - **Add Earthdata Footprints**: Copy/export an Earthdata results GeoJSON as a Processing output
+- **Export NASA Earthdata STAC**: Convert exported granules JSON into a STAC ItemCollection
+- **Export NASA Earthdata Workflow Bundle**: Package search metadata, flat rows, raw granules, STAC content, and an optional download manifest path
+- **NASA Earthdata Collection Info**: Fetch CMR collection metadata summary by short name or concept ID
+- **Check New NASA Earthdata Granules**: Compare a fresh search against a baseline granules JSON and write only newly discovered granules
 - **Create RGB COG Layer**: Build an RGB VRT from red, green, and blue COG URLs or paths
 - **Create Normalized Difference VRT**: Build NDVI/NDWI/MNDWI/NDMI/NBR-style VRTs from two COG URLs or local rasters
 
