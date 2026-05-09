@@ -538,17 +538,43 @@ class CreateNormalizedDifferenceVrtAlgorithm(_BaseAlgorithm):
 
         positive_path = source_path(positive)
         negative_path = source_path(negative)
-        gdal.SetConfigOption("GDAL_VRT_ENABLE_PYTHON", "YES")
-        gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
-        gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF")
-        source_ds = gdal.Open(positive_path)
-        if source_ds is None:
-            raise QgsProcessingException("Could not open positive band source")
-        width = source_ds.RasterXSize
-        height = source_ds.RasterYSize
-        projection = source_ds.GetProjectionRef() or ""
-        geotransform = source_ds.GetGeoTransform(can_return_null=True)
-        source_ds = None
+        config_overrides = {
+            "GDAL_VRT_ENABLE_PYTHON": "YES",
+            "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+            "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": "tif,tiff,TIF,TIFF",
+        }
+        previous_options = {key: gdal.GetConfigOption(key) for key in config_overrides}
+        for key, value in config_overrides.items():
+            gdal.SetConfigOption(key, value)
+        try:
+            source_ds = gdal.Open(positive_path)
+            if source_ds is None:
+                raise QgsProcessingException("Could not open positive band source")
+            width = source_ds.RasterXSize
+            height = source_ds.RasterYSize
+            projection = source_ds.GetProjectionRef() or ""
+            geotransform = source_ds.GetGeoTransform(can_return_null=True)
+            source_ds = None
+
+            negative_ds = gdal.Open(negative_path)
+            if negative_ds is None:
+                raise QgsProcessingException("Could not open negative band source")
+            if (
+                negative_ds.RasterXSize != width
+                or negative_ds.RasterYSize != height
+                or (negative_ds.GetProjectionRef() or "") != projection
+                or negative_ds.GetGeoTransform(can_return_null=True) != geotransform
+            ):
+                negative_ds = None
+                raise QgsProcessingException(
+                    "Positive and negative band sources must share the same "
+                    "size, CRS, and geotransform; reproject/resample them to a "
+                    "common grid first"
+                )
+            negative_ds = None
+        finally:
+            for key, value in previous_options.items():
+                gdal.SetConfigOption(key, value)
         geotransform_text = (
             ", ".join(f"{value:.16g}" for value in geotransform) if geotransform else ""
         )

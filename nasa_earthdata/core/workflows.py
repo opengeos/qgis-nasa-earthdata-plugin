@@ -499,6 +499,7 @@ def granules_to_stac_item_collection(granules, dataset_item=None, gdf=None):
     """Convert granules to a lightweight STAC ItemCollection."""
     dataset_item = dataset_item or {}
     rows = granules_to_export_rows(granules, dataset_item)
+    collection_href = cmr_collection_url(dataset_item)
     features = []
     for index, row in enumerate(rows):
         geometry = _geometry_for_index(gdf, index)
@@ -514,6 +515,14 @@ def granules_to_stac_item_collection(granules, dataset_item=None, gdf=None):
                 "title": filename,
                 "roles": [role],
             }
+
+        cloud_cover_raw = row.get("cloud_cover")
+        try:
+            cloud_cover = (
+                float(cloud_cover_raw) if cloud_cover_raw not in (None, "") else None
+            )
+        except (TypeError, ValueError):
+            cloud_cover = None
 
         features.append(
             {
@@ -532,14 +541,14 @@ def granules_to_stac_item_collection(granules, dataset_item=None, gdf=None):
                     "earthdata:provider": row.get("provider")
                     or dataset_item.get("provider", ""),
                     "earthdata:granule_ur": row.get("granule_ur", ""),
-                    "eo:cloud_cover": row.get("cloud_cover", ""),
+                    "eo:cloud_cover": cloud_cover,
                 },
                 "collection": dataset_item.get("concept_id")
                 or dataset_item.get("short_name", ""),
                 "assets": assets,
                 "links": (
-                    [{"rel": "collection", "href": dataset_item.get("concept_id", "")}]
-                    if dataset_item.get("concept_id")
+                    [{"rel": "collection", "href": collection_href}]
+                    if collection_href
                     else []
                 ),
             }
