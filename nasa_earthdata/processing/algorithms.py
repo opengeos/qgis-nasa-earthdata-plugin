@@ -15,6 +15,7 @@ try:
         QgsProcessing,
         QgsProcessingAlgorithm,
         QgsProcessingException,
+        QgsProcessingOutputNumber,
         QgsProcessingParameterBoolean,
         QgsProcessingParameterEnum,
         QgsProcessingParameterExtent,
@@ -28,6 +29,7 @@ except Exception:  # pragma: no cover - exercised by import smoke only
     QgsProcessing = None
     QgsProcessingAlgorithm = object
     QgsProcessingException = RuntimeError
+    QgsProcessingOutputNumber = None
     QgsProcessingParameterBoolean = None
     QgsProcessingParameterEnum = None
     QgsProcessingParameterExtent = None
@@ -65,6 +67,10 @@ class _BaseAlgorithm(QgsProcessingAlgorithm):
         if parameter is not None:
             self.addParameter(parameter)
 
+    def _add_output(self, output):
+        if output is not None and hasattr(self, "addOutput"):
+            self.addOutput(output)
+
     def _parameter_as_string(self, parameters, name, context):
         if hasattr(self, "parameterAsString"):
             return self.parameterAsString(parameters, name, context)
@@ -94,6 +100,7 @@ class SearchEarthdataAlgorithm(_BaseAlgorithm):
     END_DATE = "END_DATE"
     MAX_ITEMS = "MAX_ITEMS"
     OUTPUT = "OUTPUT"
+    COUNT = "COUNT"
 
     def name(self):
         return "search_nasa_earthdata"
@@ -133,6 +140,10 @@ class SearchEarthdataAlgorithm(_BaseAlgorithm):
                 optional=True,
             )
         )
+        if QgsProcessingOutputNumber is not None:
+            self._add_output(
+                QgsProcessingOutputNumber(self.COUNT, "Number of granules")
+            )
 
     def processAlgorithm(self, parameters, context, feedback):
         from nasa_earthdata.dialogs.earthdata_dock import DataSearchWorker
@@ -172,7 +183,7 @@ class SearchEarthdataAlgorithm(_BaseAlgorithm):
                 {"short_name": short_name, "concept_id": concept_id},
             )
             write_results_geojson(output, rows, None)
-        return {self.OUTPUT: output, "COUNT": len(granules)}
+        return {self.OUTPUT: output, self.COUNT: len(granules)}
 
 
 class DownloadGranulesAlgorithm(_BaseAlgorithm):
@@ -213,6 +224,7 @@ class DownloadGranulesAlgorithm(_BaseAlgorithm):
         import json
 
         from nasa_earthdata.core.venv_manager import import_earthaccess
+        from nasa_earthdata.core.workflows import likely_existing_download_files
 
         granules_json = self._parameter_as_string(
             parameters, self.GRANULES_JSON, context
@@ -220,12 +232,32 @@ class DownloadGranulesAlgorithm(_BaseAlgorithm):
         output_folder = self._parameter_as_string(
             parameters, self.OUTPUT_FOLDER, context
         )
+        skip_existing = self._parameter_as_bool(parameters, self.SKIP_EXISTING, context)
         with open(granules_json, "r", encoding="utf-8") as f:
             granules = json.load(f)
-        earthaccess = import_earthaccess()
-        files = earthaccess.download(granules, local_path=output_folder)
+
+        skipped_files = []
+        if skip_existing:
+            pending = []
+            for granule in granules:
+                existing = likely_existing_download_files(granule, output_folder)
+                if existing:
+                    skipped_files.extend(existing)
+                else:
+                    pending.append(granule)
+            if feedback and skipped_files:
+                feedback.pushInfo(
+                    f"Skipping {len(granules) - len(pending)} granule(s) with "
+                    f"existing files in {output_folder}"
+                )
+            granules = pending
+
+        files = []
+        if granules:
+            earthaccess = import_earthaccess()
+            files = earthaccess.download(granules, local_path=output_folder) or []
         return {
-            "FILES": [str(path) for path in files or []],
+            "FILES": [str(path) for path in files] + skipped_files,
             self.OUTPUT_FOLDER: output_folder,
         }
 

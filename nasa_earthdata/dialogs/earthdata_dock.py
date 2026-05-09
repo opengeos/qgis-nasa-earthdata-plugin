@@ -57,6 +57,7 @@ from qgis.core import (
 from ..core.net import https_only_urlopen
 from ..core.workflows import (
     build_search_preset,
+    cog_links_from_links,
     delete_recent_search,
     delete_search_preset,
     download_manifest_path,
@@ -2421,7 +2422,7 @@ class EarthdataDockWidget(QDockWidget):
         dataset_item = self.dataset_combo.currentData() or {}
         row = granule_export_row(granule, result_index, dataset_item)
         links = granule_links(granule)
-        cog_links = [link for link in links if link in row.get("cog_links", "")]
+        cog_links = cog_links_from_links(links)
         lines = [
             f"Native ID: {row.get('native_id', '')}",
             f"Dataset: {row.get('dataset_short_name', '')}",

@@ -397,6 +397,7 @@ def write_download_manifest(path, rows):
     """Write download queue results to a manifest CSV."""
     fieldnames = ["index", "native_id", "status", "message", "files"]
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
