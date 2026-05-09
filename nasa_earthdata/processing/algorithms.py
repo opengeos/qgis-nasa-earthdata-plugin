@@ -724,9 +724,18 @@ class CheckNewGranulesAlgorithm(SearchEarthdataAlgorithm):
 
         with open(baseline_json, "r", encoding="utf-8") as f:
             baseline = json.load(f)
+        if isinstance(baseline, dict):
+            baseline = baseline.get("granules", baseline.get("results"))
+        if baseline is None:
+            baseline = []
+        if not isinstance(baseline, list):
+            raise QgsProcessingException(
+                "Baseline JSON must be a list of granules or contain a "
+                "'granules' list (e.g. earthaccess granules JSON)."
+            )
         baseline_ids = {
             granule_native_id(granule, f"Item {index + 1}")
-            for index, granule in enumerate(baseline or [])
+            for index, granule in enumerate(baseline)
         }
 
         earthaccess = import_earthaccess()

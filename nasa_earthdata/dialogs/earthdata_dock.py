@@ -2882,13 +2882,19 @@ class EarthdataDockWidget(QDockWidget):
         return f"<ul>{items}</ul>"
 
     def _open_selected_quicklook(self):
-        """Open the first quicklook link for the selected granule."""
-        result_index = self._first_selected_result_index()
-        if result_index < 0 or not self._search_results:
+        """Open the first available quicklook link across selected granules."""
+        if not self._search_results:
             return
-        quicklooks = granule_quicklook_links(self._search_results[result_index])
-        if quicklooks:
-            webbrowser.open(quicklooks[0])
+        selected_indices = self._get_selected_result_indices()
+        if not selected_indices:
+            first_index = self._first_selected_result_index()
+            selected_indices = [first_index] if first_index >= 0 else []
+        for result_index in selected_indices:
+            if 0 <= result_index < len(self._search_results):
+                quicklooks = granule_quicklook_links(self._search_results[result_index])
+                if quicklooks:
+                    webbrowser.open(quicklooks[0])
+                    return
 
     def _quicklook_gallery_html(self):
         """Return an HTML quicklook gallery for selected or current results."""
