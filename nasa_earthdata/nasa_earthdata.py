@@ -6,10 +6,13 @@ integration, menu items, toolbar buttons, and dockable panels.
 """
 
 import os
+import sys
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMenu, QToolBar, QMessageBox
+
+OPEN_GEOAGENT_PLUGIN_CANDIDATES = ("open_geoagent",)
 
 
 class NASAEarthdata:
@@ -29,7 +32,6 @@ class NASAEarthdata:
 
         # Dock widgets (lazy loaded)
         self._earthdata_dock = None
-        self._chat_dock = None
         self._settings_dock = None
         self._deps_signal_connected = False
 
@@ -117,12 +119,16 @@ class NASAEarthdata:
             parent=self.iface.mainWindow(),
         )
 
-        self.chat_action = self.add_action(
-            main_icon,
+        ai_icon = os.path.join(icon_base, "ai_chat.svg")
+        if not os.path.exists(ai_icon):
+            ai_icon = ":/images/themes/default/mActionHelpContents.svg"
+
+        self.ai_chat_action = self.add_action(
+            ai_icon,
             "AI Assistant",
-            self.toggle_chat_dock,
-            status_tip="Ask GeoAgent to search and visualize NASA Earthdata",
-            checkable=True,
+            self.open_ai_assistant,
+            add_to_toolbar=False,
+            status_tip="Open the OpenGeoAgent chat panel",
             parent=self.iface.mainWindow(),
         )
 
@@ -169,17 +175,6 @@ class NASAEarthdata:
             self.iface.removeDockWidget(self._earthdata_dock)
             self._earthdata_dock.deleteLater()
             self._earthdata_dock = None
-
-        if self._chat_dock:
-            shutdown = getattr(self._chat_dock, "shutdown", None)
-            if callable(shutdown):
-                try:
-                    shutdown()
-                except Exception:
-                    pass  # nosec B110
-            self.iface.removeDockWidget(self._chat_dock)
-            self._chat_dock.deleteLater()
-            self._chat_dock = None
 
         if self._settings_dock:
             self.iface.removeDockWidget(self._settings_dock)
@@ -242,56 +237,125 @@ class NASAEarthdata:
         """Handle NASA Earthdata dock visibility change."""
         self.earthdata_action.setChecked(visible)
 
-    def toggle_chat_dock(self):
-        """Toggle the NASA Earthdata AI assistant dock widget."""
-        if self._assistant_dependencies_missing():
-            self._open_settings_deps_tab()
-            self.chat_action.setChecked(False)
-            try:
-                self.iface.messageBar().pushWarning(
-                    "NASA Earthdata",
-                    "Install missing GeoAgent dependencies before opening the AI Assistant.",
-                )
-            except Exception:
-                pass  # nosec B110
+    def open_ai_assistant(self):
+        """Open the OpenGeoAgent chat panel, or prompt for plugin installation."""
+        plugin = self._get_open_geoagent_plugin()
+        if plugin is None:
+            self._prompt_open_geoagent_install()
             return
 
-        if self._chat_dock is None:
+        if not hasattr(plugin, "toggle_chat_dock"):
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "OpenGeoAgent Required",
+                "OpenGeoAgent is installed, but this version does not expose "
+                "the chat panel launcher expected by NASA Earthdata.\n\n"
+                "Please update OpenGeoAgent and try again.",
+            )
+            return
+
+        try:
+            chat_dock = getattr(plugin, "_chat_dock", None)
+            if chat_dock is not None and chat_dock.isVisible():
+                chat_dock.show()
+                chat_dock.raise_()
+                return
+
+            plugin.toggle_chat_dock()
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "OpenGeoAgent",
+                f"Failed to open the OpenGeoAgent chat panel:\n{exc}",
+            )
+
+    def _get_open_geoagent_plugin(self):
+        """Return the loaded OpenGeoAgent plugin instance, loading it if possible."""
+        try:
+            import qgis.utils as qgis_utils
+        except Exception as exc:
+            print(
+                f"NASA Earthdata: could not import qgis.utils: {exc}",
+                file=sys.stderr,
+            )
+            return None
+
+        plugins = getattr(qgis_utils, "plugins", {}) or {}
+        for package_name in OPEN_GEOAGENT_PLUGIN_CANDIDATES:
+            plugin = plugins.get(package_name)
+            if plugin is not None:
+                return plugin
+
+        available = set(getattr(qgis_utils, "available_plugins", []) or [])
+        for package_name in OPEN_GEOAGENT_PLUGIN_CANDIDATES:
+            if package_name not in available:
+                continue
+
             try:
-                from .dialogs.chat_dock import ChatDockWidget
+                load_plugin = getattr(qgis_utils, "loadPlugin", None)
+                if callable(load_plugin) and package_name not in plugins:
+                    load_plugin(package_name)
 
-                self._chat_dock = ChatDockWidget(
-                    self.iface, self, self.iface.mainWindow()
+                start_plugin = getattr(qgis_utils, "startPlugin", None)
+                active_plugins = getattr(qgis_utils, "active_plugins", []) or []
+                if callable(start_plugin) and package_name not in active_plugins:
+                    start_plugin(package_name)
+
+                plugins = getattr(qgis_utils, "plugins", {}) or {}
+                plugin = plugins.get(package_name)
+                if plugin is not None:
+                    return plugin
+            except Exception as exc:
+                print(
+                    f"NASA Earthdata: failed to load OpenGeoAgent plugin "
+                    f"'{package_name}': {exc}",
+                    file=sys.stderr,
                 )
-                self._chat_dock.setObjectName("NASAEarthdataChatDock")
-                self._chat_dock.visibilityChanged.connect(
-                    self._on_chat_visibility_changed
-                )
-                self.iface.addDockWidget(
-                    Qt.DockWidgetArea.RightDockWidgetArea, self._chat_dock
-                )
-                self._chat_dock.show()
-                self._chat_dock.raise_()
+
+        return None
+
+    def _prompt_open_geoagent_install(self):
+        """Tell the user how to install OpenGeoAgent from the QGIS Plugin Manager."""
+        message = (
+            "The AI Assistant is provided by the OpenGeoAgent QGIS plugin.\n\n"
+            "Install it from the QGIS Plugin Manager:\n"
+            "  Plugins > Manage and Install Plugins... > All\n"
+            "  Search for 'OpenGeoAgent' and click Install Plugin.\n\n"
+            "After installing (or enabling) OpenGeoAgent, click the AI "
+            "Assistant button again."
+        )
+        box = QMessageBox(self.iface.mainWindow())
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Install OpenGeoAgent")
+        box.setText(message)
+        manager_button = box.addButton(
+            "Open Plugin Manager", QMessageBox.ButtonRole.ActionRole
+        )
+        box.addButton(QMessageBox.StandardButton.Ok)
+        box.exec()
+
+        if box.clickedButton() == manager_button:
+            self._open_qgis_plugin_manager()
+
+    def _open_qgis_plugin_manager(self):
+        """Open the QGIS Plugin Manager dialog."""
+        try:
+            action = self.iface.actionManagePlugins()
+            if action is not None:
+                action.trigger()
                 return
+        except Exception as exc:
+            print(
+                f"NASA Earthdata: could not open QGIS Plugin Manager: {exc}",
+                file=sys.stderr,
+            )
 
-            except Exception as e:
-                QMessageBox.critical(
-                    self.iface.mainWindow(),
-                    "Error",
-                    f"Failed to create NASA Earthdata AI Assistant:\n{str(e)}",
-                )
-                self.chat_action.setChecked(False)
-                return
-
-        if self._chat_dock.isVisible():
-            self._chat_dock.hide()
-        else:
-            self._chat_dock.show()
-            self._chat_dock.raise_()
-
-    def _on_chat_visibility_changed(self, visible):
-        """Handle NASA Earthdata AI assistant dock visibility change."""
-        self.chat_action.setChecked(visible)
+        QMessageBox.information(
+            self.iface.mainWindow(),
+            "Open Plugin Manager",
+            "Open the QGIS Plugin Manager from the menu:\n"
+            "Plugins > Manage and Install Plugins...",
+        )
 
     def toggle_settings_dock(self):
         """Toggle the Settings dock widget visibility."""
@@ -373,15 +437,6 @@ class NASAEarthdata:
         except Exception:
             # Don't let dependency check errors prevent the dock from opening
             pass  # nosec B110
-
-    def _assistant_dependencies_missing(self):
-        """Return True when GeoAgent assistant dependencies are unavailable."""
-        try:
-            from .core.venv_manager import assistant_dependencies_met
-
-            return not assistant_dependencies_met()
-        except Exception:
-            return True
 
     def _open_settings_deps_tab(self):
         """Open the Settings dock and switch to the Dependencies tab."""

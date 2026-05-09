@@ -27,16 +27,7 @@ REQUIRED_PACKAGES = [
     ("geopandas", ""),
 ]
 
-ASSISTANT_PACKAGES = [
-    ("geoagent", "[providers]>=1.0.0"),
-    ("openai", ">=1.0"),
-    ("anthropic", ">=0.40"),
-    ("google-genai", ">=1.0"),
-    ("ollama", ">=0.3"),
-    ("strands-agents", "[litellm]>=1.37"),
-]
-
-INSTALL_PACKAGES = REQUIRED_PACKAGES + ASSISTANT_PACKAGES
+INSTALL_PACKAGES = REQUIRED_PACKAGES
 
 
 def _log(message, level=Qgis.MessageLevel.Info):
@@ -1189,6 +1180,8 @@ def check_dependencies(include_assistant=False):
 
     Attempts to use importlib.metadata after ensuring venv packages
     are on sys.path. This is a lightweight check suitable for UI display.
+    The include_assistant argument is kept for compatibility and ignored;
+    OpenGeoAgent now owns assistant runtime dependencies.
 
     Returns:
         A tuple of (all_ok, missing, installed) where:
@@ -1201,8 +1194,7 @@ def check_dependencies(include_assistant=False):
     missing = []
     installed = []
 
-    packages = INSTALL_PACKAGES if include_assistant else REQUIRED_PACKAGES
-    for package_name, version_spec in packages:
+    for package_name, version_spec in REQUIRED_PACKAGES:
         try:
             version = importlib.metadata.version(package_name)
             installed.append((package_name, version))
@@ -1211,12 +1203,6 @@ def check_dependencies(include_assistant=False):
 
     all_ok = len(missing) == 0
     return all_ok, missing, installed
-
-
-def assistant_dependencies_met():
-    """Return True when GeoAgent and provider packages are installed."""
-    all_ok, _missing, _installed = check_dependencies(include_assistant=True)
-    return all_ok
 
 
 # ---------------------------------------------------------------------------
