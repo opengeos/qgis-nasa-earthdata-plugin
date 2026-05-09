@@ -1032,6 +1032,7 @@ class EarthdataDockWidget(QDockWidget):
         self._adjusting_results_columns = False
         self._adjusting_download_columns = False
         self._syncing_footprint_table_selection = False
+        self._selection_update_pending = False
         self._saved_presets = []
         self._recent_searches = []
         self._last_download_granules = []
@@ -1429,6 +1430,7 @@ class EarthdataDockWidget(QDockWidget):
         self.preview_section_check = self._add_collapsible_section(
             results_layout, "Quicklook and Citation", preview_group, checked=False
         )
+        self.preview_section_check.toggled.connect(self._on_preview_section_toggled)
 
         # COG file selection controls
         cog_mode_layout = QHBoxLayout()
@@ -2693,19 +2695,31 @@ class EarthdataDockWidget(QDockWidget):
                 pass  # nosec B110
             self._selected_footprints_layer = None
 
-    def _add_selected_footprints_overlay(self, features):
-        """Draw selected footprints as a yellow outline layer above results."""
-        if not features:
+    def _clear_selected_footprints_overlay(self):
+        """Clear selected-footprint overlay features without removing the layer."""
+        selected_layer = self._valid_layer_or_none("_selected_footprints_layer")
+        if selected_layer is None:
             return
-
         try:
-            footprints_layer = self._valid_layer_or_none("_footprints_layer")
-            from qgis.core import (
-                QgsFeature,
-                QgsFillSymbol,
-                QgsSingleSymbolRenderer,
-                QgsWkbTypes,
-            )
+            provider = selected_layer.dataProvider()
+            feature_ids = [feature.id() for feature in selected_layer.getFeatures()]
+            if feature_ids:
+                provider.deleteFeatures(feature_ids)
+            selected_layer.updateExtents()
+            if hasattr(selected_layer, "triggerRepaint"):
+                selected_layer.triggerRepaint()
+        except Exception as e:
+            self._log(f"Error clearing selected footprint outline: {e}", error=True)
+
+    def _ensure_selected_footprints_layer(self):
+        """Return the reusable outline-only selected-footprints layer."""
+        selected_layer = self._valid_layer_or_none("_selected_footprints_layer")
+        if selected_layer is not None:
+            return selected_layer
+
+        footprints_layer = self._valid_layer_or_none("_footprints_layer")
+        try:
+            from qgis.core import QgsFillSymbol, QgsSingleSymbolRenderer, QgsWkbTypes
 
             geometry_name = (
                 QgsWkbTypes.displayString(footprints_layer.wkbType())
@@ -2719,16 +2733,6 @@ class EarthdataDockWidget(QDockWidget):
                 "Selected NASA Earthdata Footprints",
                 "memory",
             )
-            provider = selected_layer.dataProvider()
-            overlay_features = []
-            for source_feature in features:
-                feature = QgsFeature()
-                feature.setGeometry(source_feature.geometry())
-                overlay_features.append(feature)
-
-            provider.addFeatures(overlay_features)
-            selected_layer.updateExtents()
-
             symbol = QgsFillSymbol.createSimple(
                 {
                     "color": "255,255,0,0",
@@ -2739,6 +2743,34 @@ class EarthdataDockWidget(QDockWidget):
             selected_layer.setRenderer(QgsSingleSymbolRenderer(symbol))
             QgsProject.instance().addMapLayer(selected_layer)
             self._selected_footprints_layer = selected_layer
+            return selected_layer
+        except Exception as e:
+            self._log(f"Error creating selected footprint outline: {e}", error=True)
+            return None
+
+    def _add_selected_footprints_overlay(self, features):
+        """Draw selected footprints as a yellow outline layer above results."""
+        self._clear_selected_footprints_overlay()
+        if not features:
+            return
+
+        try:
+            from qgis.core import QgsFeature
+
+            selected_layer = self._ensure_selected_footprints_layer()
+            if selected_layer is None:
+                return
+            provider = selected_layer.dataProvider()
+            overlay_features = []
+            for source_feature in features:
+                feature = QgsFeature()
+                feature.setGeometry(source_feature.geometry())
+                overlay_features.append(feature)
+
+            provider.addFeatures(overlay_features)
+            selected_layer.updateExtents()
+            if hasattr(selected_layer, "triggerRepaint"):
+                selected_layer.triggerRepaint()
         except Exception as e:
             self._log(f"Error drawing selected footprint outline: {e}", error=True)
 
@@ -2748,8 +2780,6 @@ class EarthdataDockWidget(QDockWidget):
         if selected_rows:
             self.display_btn.setEnabled(True)
             self.download_btn.setEnabled(True)
-            # Populate COG dropdown for the first selected granule
-            self._populate_cog_dropdown(selected_rows[0].row())
         else:
             # Still enable if we have results
             has_results = (
@@ -2764,10 +2794,42 @@ class EarthdataDockWidget(QDockWidget):
             self._clear_rgb_channel_combos()
             self._clear_index_combos()
 
+        self._schedule_selection_update()
+
+    def _schedule_selection_update(self):
+        """Defer expensive selection side effects until after row repaint."""
+        if self._selection_update_pending:
+            return
+        self._selection_update_pending = True
+        QTimer.singleShot(25, self._apply_selection_update)
+
+    def _apply_selection_update(self):
+        """Run selection-dependent updates after the table selection has painted."""
+        self._selection_update_pending = False
+        selected_rows = self.results_table.selectionModel().selectedRows()
+        if selected_rows:
+            self._populate_cog_dropdown(selected_rows[0].row())
         if not self._syncing_footprint_table_selection:
             self._sync_footprint_selection_from_table()
         self._update_granule_details()
-        self._update_quicklook_preview()
+        if self._preview_section_is_open():
+            QTimer.singleShot(75, self._update_quicklook_preview)
+
+    def _preview_section_is_open(self):
+        """Return whether quicklook preview rendering is currently requested."""
+        return bool(
+            hasattr(self, "preview_section_check")
+            and self.preview_section_check.isChecked()
+        )
+
+    def _on_preview_section_toggled(self, checked):
+        """Render quicklook preview only when the preview section is opened."""
+        if checked:
+            QTimer.singleShot(75, self._update_quicklook_preview)
+            return
+        self.preview_text.clear()
+        self.open_quicklook_btn.setEnabled(False)
+        self.open_gallery_btn.setEnabled(False)
 
     def _get_result_index_for_table_row(self, table_row):
         """Map current table row (after sorting) to original search result index."""
@@ -2845,6 +2907,8 @@ class EarthdataDockWidget(QDockWidget):
 
     def _update_quicklook_preview(self):
         """Update quicklook/citation links for selected granules."""
+        if not self._preview_section_is_open():
+            return
         if not self._search_results:
             self.preview_text.clear()
             self.open_quicklook_btn.setEnabled(False)
@@ -2882,11 +2946,18 @@ class EarthdataDockWidget(QDockWidget):
             )
             if quicklooks:
                 html_parts.append("<div>")
+                rendered_images = 0
                 for url in quicklooks[:4]:
-                    image_html = self._quicklook_img_html(url, 96)
+                    image_html = self._quicklook_img_html(url, 96, download=True)
                     if image_html:
                         html_parts.append(image_html)
+                        rendered_images += 1
                 html_parts.append("</div>")
+                if rendered_images == 0:
+                    html_parts.append(
+                        "<p>Quicklook links are available, but thumbnails could not "
+                        "be loaded automatically.</p>"
+                    )
                 html_parts.append(self._link_list_html(quicklooks, ""))
             elif inaccessible_quicklooks:
                 html_parts.append(
@@ -2929,7 +3000,7 @@ class EarthdataDockWidget(QDockWidget):
         items = "".join(f"<li>{self._link_html(link)}</li>" for link in links)
         return f"<ul>{items}</ul>"
 
-    def _cached_quicklook_image_src(self, url):
+    def _cached_quicklook_image_src(self, url, download=True):
         """Download an HTTPS quicklook to cache and return a local image URI."""
         url = str(url or "").strip()
         if not url.lower().startswith(("http://", "https://")):
@@ -2943,6 +3014,8 @@ class EarthdataDockWidget(QDockWidget):
         cache_dir.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
         image_path = cache_dir / f"{digest}{suffix}"
+        if not image_path.exists() and not download:
+            return ""
         if not image_path.exists():
             try:
                 with https_only_urlopen(url, timeout=20) as resp:
@@ -2952,9 +3025,9 @@ class EarthdataDockWidget(QDockWidget):
                 return ""
         return image_path.as_uri()
 
-    def _quicklook_img_html(self, url, height):
+    def _quicklook_img_html(self, url, height, download=True):
         """Return HTML for a cached quicklook image linked to its source URL."""
-        src = self._cached_quicklook_image_src(url)
+        src = self._cached_quicklook_image_src(url, download=download)
         if not src:
             return ""
         escaped_url = html.escape(url, quote=True)
@@ -3427,7 +3500,7 @@ class EarthdataDockWidget(QDockWidget):
             selected_indices = set(self._get_selected_result_indices())
             self._syncing_footprint_table_selection = True
             footprints_layer.removeSelection()
-            self._remove_selected_footprints()
+            self._clear_selected_footprints_overlay()
 
             if not selected_indices:
                 self.iface.mapCanvas().refresh()
@@ -3532,7 +3605,7 @@ class EarthdataDockWidget(QDockWidget):
                 footprints_layer
             )
             self._select_table_rows_for_result_indices(result_indices)
-            self._remove_selected_footprints()
+            self._clear_selected_footprints_overlay()
             if result_indices:
                 selected_features = []
                 selected = set(result_indices)
@@ -3550,7 +3623,8 @@ class EarthdataDockWidget(QDockWidget):
             finally:
                 self._syncing_footprint_table_selection = False
             self._update_granule_details()
-            self._update_quicklook_preview()
+            if self._preview_section_is_open():
+                QTimer.singleShot(75, self._update_quicklook_preview)
         except RuntimeError as e:
             if "wrapped C/C++ object" in str(e):
                 self._footprints_layer = None
@@ -3944,6 +4018,7 @@ class EarthdataDockWidget(QDockWidget):
         self.create_index_btn.setEnabled(self._index_inputs_ready())
         self._index_worker = None
         try:
+            self._enable_plugin_generated_vrt_python()
             layer = QgsRasterLayer(output_path, f"NASA Earthdata {index_name.upper()}")
             if layer.isValid():
                 self._set_index_layer_visual_range(layer)
@@ -3962,6 +4037,22 @@ class EarthdataDockWidget(QDockWidget):
             QMessageBox.critical(
                 self, "Create Index VRT", f"Failed to create VRT:\n{e}"
             )
+
+    def _enable_plugin_generated_vrt_python(self):
+        """Allow QGIS/GDAL to render normalized-difference VRTs made here."""
+        try:
+            from osgeo import gdal
+
+            gdal.SetConfigOption("GDAL_VRT_ENABLE_PYTHON", "YES")
+            gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+            gdal.SetConfigOption(
+                "CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF"
+            )
+            self._log(
+                "Enabled GDAL Python VRT evaluation for plugin-generated index layers"
+            )
+        except Exception as e:
+            self._log(f"Could not enable GDAL Python VRT evaluation: {e}", error=True)
 
     def _on_index_vrt_error(self, error_msg):
         """Handle background normalized-difference VRT creation errors."""
