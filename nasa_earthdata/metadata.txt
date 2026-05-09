@@ -3,7 +3,7 @@ name=NASA Earthdata
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 description=Search, visualize, and download NASA Earthdata products in QGIS. Supports COG visualization and data footprint display.
-version=0.8.0
+version=0.9.0
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -37,6 +37,12 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.9.0
+        - Add quicklook gallery, cached thumbnails, and improved preview behavior
+        - Add richer result table filtering and bidirectional footprint/table selection
+        - Add active layer AOI bounding box support
+        - Add STAC, workflow bundle, collection info, and new-granule Processing tools
+        - Improve normalized-difference VRT rendering in QGIS
     0.8.0
         - Add saved searches, recent searches, result export, granule details, download queue, and Processing provider
         - Improve Earthdata search panel dataset selection, COG display, and layout
