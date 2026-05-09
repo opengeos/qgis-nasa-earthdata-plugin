@@ -204,7 +204,7 @@ The latest queue state is also written to `~/.qgis_nasa_earthdata/workflows/down
 
 ### AI Assistant Context
 
-If OpenGeoAgent is installed, click **AI Assistant** from the NASA Earthdata menu or **AI Context** in the result preview section. The plugin opens OpenGeoAgent and passes the current dataset, bbox, date range, result count, selected granules, and selected COG links when the OpenGeoAgent version exposes a context handoff method. If it does not, the same context is copied to the clipboard.
+If OpenGeoAgent is installed, click **AI Assistant** from the NASA Earthdata menu. The plugin opens OpenGeoAgent and passes the current dataset, bbox, date range, result count, selected granules, and selected COG links when the OpenGeoAgent version exposes a context handoff method.
 
 ### QGIS Processing
 

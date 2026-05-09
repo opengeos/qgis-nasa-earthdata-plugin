@@ -17,7 +17,16 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
-from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal, QSettings, QDate, QEvent, QTimer
+from qgis.PyQt.QtCore import (
+    Qt,
+    QThread,
+    pyqtSignal,
+    QSettings,
+    QDate,
+    QEvent,
+    QTimer,
+    QItemSelectionModel,
+)
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QWidget,
@@ -1022,6 +1031,7 @@ class EarthdataDockWidget(QDockWidget):
         self._previous_map_tool = None
         self._adjusting_results_columns = False
         self._adjusting_download_columns = False
+        self._syncing_footprint_table_selection = False
         self._saved_presets = []
         self._recent_searches = []
         self._last_download_granules = []
@@ -1414,10 +1424,6 @@ class EarthdataDockWidget(QDockWidget):
         self.open_gallery_btn.setEnabled(False)
         self.open_gallery_btn.clicked.connect(self._open_quicklook_gallery)
         preview_btn_layout.addWidget(self.open_gallery_btn)
-        self.copy_context_btn = QPushButton("AI Context")
-        self.copy_context_btn.setEnabled(False)
-        self.copy_context_btn.clicked.connect(self._send_context_to_ai_assistant)
-        preview_btn_layout.addWidget(self.copy_context_btn)
         preview_btn_layout.addStretch()
         preview_layout.addLayout(preview_btn_layout)
         self.preview_section_check = self._add_collapsible_section(
@@ -1957,7 +1963,6 @@ class EarthdataDockWidget(QDockWidget):
         self.export_json_btn.setEnabled(False)
         self.export_stac_btn.setEnabled(False)
         self.export_bundle_btn.setEnabled(False)
-        self.copy_context_btn.setEnabled(False)
         self.open_quicklook_btn.setEnabled(False)
         self.open_gallery_btn.setEnabled(False)
         self.details_text.clear()
@@ -2432,7 +2437,6 @@ class EarthdataDockWidget(QDockWidget):
         self.export_json_btn.setEnabled(True)
         self.export_stac_btn.setEnabled(True)
         self.export_bundle_btn.setEnabled(True)
-        self.copy_context_btn.setEnabled(True)
         self._update_granule_details()
 
     def _on_search_error(self, error_msg):
@@ -2523,6 +2527,7 @@ class EarthdataDockWidget(QDockWidget):
 
                 QgsProject.instance().addMapLayer(layer)
                 self._footprints_layer = layer
+                self._connect_footprint_selection(layer)
 
                 if self.settings.value("NASAEarthdata/auto_zoom", True, type=bool):
                     # Zoom to footprints with proper CRS handling
@@ -2535,9 +2540,39 @@ class EarthdataDockWidget(QDockWidget):
         except Exception as e:
             self._log(f"Error adding footprints: {e}", error=True)
 
+    def _valid_layer_or_none(self, attr_name):
+        """Return a live QgsMapLayer wrapper, clearing stale deleted wrappers."""
+        layer = getattr(self, attr_name, None)
+        if layer is None:
+            return None
+        try:
+            if layer.isValid():
+                return layer
+        except RuntimeError:
+            pass
+        except Exception:
+            pass  # nosec B110
+        setattr(self, attr_name, None)
+        return None
+
+    def _connect_footprint_selection(self, layer):
+        """Connect footprint feature selection changes to the result table."""
+        try:
+            layer.selectionChanged.connect(self._on_footprint_selection_changed)
+        except Exception as e:
+            self._log(f"Could not connect footprint selection sync: {e}", error=True)
+
+    def _disconnect_footprint_selection(self, layer):
+        """Disconnect footprint feature selection changes when removing the layer."""
+        try:
+            layer.selectionChanged.disconnect(self._on_footprint_selection_changed)
+        except Exception:
+            pass  # nosec B110
+
     def _zoom_to_footprints(self):
         """Zoom the map canvas to selected footprints or all if none selected."""
-        if self._footprints_layer is None or not self._footprints_layer.isValid():
+        footprints_layer = self._valid_layer_or_none("_footprints_layer")
+        if footprints_layer is None:
             return
 
         if self._search_gdf is None:
@@ -2561,11 +2596,11 @@ class EarthdataDockWidget(QDockWidget):
                 self._log(f"Zooming to {len(indices)} selected footprint(s)")
             else:
                 # Zoom to all footprints
-                layer_extent = self._footprints_layer.extent()
+                layer_extent = footprints_layer.extent()
                 self._log("Zooming to all footprints")
 
             # Transform extent to map CRS if different
-            layer_crs = self._footprints_layer.crs()
+            layer_crs = footprints_layer.crs()
             canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
 
             if layer_crs != canvas_crs:
@@ -2598,10 +2633,12 @@ class EarthdataDockWidget(QDockWidget):
     def _remove_footprints(self):
         """Remove footprints layer from map and clean up temporary file."""
         self._remove_selected_footprints()
-        if self._footprints_layer is not None:
+        footprints_layer = getattr(self, "_footprints_layer", None)
+        if footprints_layer is not None:
+            self._disconnect_footprint_selection(footprints_layer)
             try:
                 # Remove layer from project
-                QgsProject.instance().removeMapLayer(self._footprints_layer.id())
+                QgsProject.instance().removeMapLayer(footprints_layer.id())
             except Exception:
                 pass  # nosec B110
 
@@ -2644,11 +2681,10 @@ class EarthdataDockWidget(QDockWidget):
 
     def _remove_selected_footprints(self):
         """Remove the outline-only selected footprint overlay."""
-        if self._selected_footprints_layer is not None:
+        selected_layer = getattr(self, "_selected_footprints_layer", None)
+        if selected_layer is not None:
             try:
-                QgsProject.instance().removeMapLayer(
-                    self._selected_footprints_layer.id()
-                )
+                QgsProject.instance().removeMapLayer(selected_layer.id())
             except Exception:
                 pass  # nosec B110
             try:
@@ -2663,6 +2699,7 @@ class EarthdataDockWidget(QDockWidget):
             return
 
         try:
+            footprints_layer = self._valid_layer_or_none("_footprints_layer")
             from qgis.core import (
                 QgsFeature,
                 QgsFillSymbol,
@@ -2670,7 +2707,11 @@ class EarthdataDockWidget(QDockWidget):
                 QgsWkbTypes,
             )
 
-            geometry_name = QgsWkbTypes.displayString(self._footprints_layer.wkbType())
+            geometry_name = (
+                QgsWkbTypes.displayString(footprints_layer.wkbType())
+                if footprints_layer is not None
+                else "Polygon"
+            )
             if "Polygon" not in geometry_name:
                 geometry_name = "Polygon"
             selected_layer = QgsVectorLayer(
@@ -2723,7 +2764,8 @@ class EarthdataDockWidget(QDockWidget):
             self._clear_rgb_channel_combos()
             self._clear_index_combos()
 
-        self._sync_footprint_selection_from_table()
+        if not self._syncing_footprint_table_selection:
+            self._sync_footprint_selection_from_table()
         self._update_granule_details()
         self._update_quicklook_preview()
 
@@ -3023,25 +3065,6 @@ class EarthdataDockWidget(QDockWidget):
         if len(selected_indices) > 8:
             lines.append(f"...and {len(selected_indices) - 8} more selected granules")
         return "\n".join(lines)
-
-    def _send_context_to_ai_assistant(self):
-        """Open OpenGeoAgent and make current plugin context available."""
-        try:
-            plugin = getattr(self.iface, "_nasa_earthdata_plugin", None)
-            if plugin is not None and hasattr(plugin, "open_ai_assistant"):
-                plugin.open_ai_assistant(context=self.ai_context_summary())
-                return
-        except Exception:
-            pass  # nosec B110
-
-        clipboard = QApplication.clipboard()
-        if clipboard is not None:
-            clipboard.setText(self.ai_context_summary())
-        QMessageBox.information(
-            self,
-            "AI Context",
-            "Current NASA Earthdata context was copied to the clipboard.",
-        )
 
     def _export_rows(self):
         """Return export rows for all current results."""
@@ -3396,12 +3419,14 @@ class EarthdataDockWidget(QDockWidget):
 
     def _sync_footprint_selection_from_table(self):
         """Highlight footprint features matching selected table rows."""
-        if self._footprints_layer is None or not self._footprints_layer.isValid():
+        footprints_layer = self._valid_layer_or_none("_footprints_layer")
+        if footprints_layer is None:
             return
 
         try:
             selected_indices = set(self._get_selected_result_indices())
-            self._footprints_layer.removeSelection()
+            self._syncing_footprint_table_selection = True
+            footprints_layer.removeSelection()
             self._remove_selected_footprints()
 
             if not selected_indices:
@@ -3409,10 +3434,11 @@ class EarthdataDockWidget(QDockWidget):
                 return
 
             selected_features = []
-            field_names = [f.name() for f in self._footprints_layer.fields()]
+            selected_feature_ids = []
+            field_names = [f.name() for f in footprints_layer.fields()]
             has_result_idx_field = "result_idx" in field_names
 
-            for feature_pos, feature in enumerate(self._footprints_layer.getFeatures()):
+            for feature_pos, feature in enumerate(footprints_layer.getFeatures()):
                 if has_result_idx_field:
                     try:
                         feature_result_idx = int(feature["result_idx"])
@@ -3423,11 +3449,115 @@ class EarthdataDockWidget(QDockWidget):
 
                 if feature_result_idx in selected_indices:
                     selected_features.append(feature)
+                    selected_feature_ids.append(feature.id())
 
+            if selected_feature_ids:
+                footprints_layer.selectByIds(selected_feature_ids)
             self._add_selected_footprints_overlay(selected_features)
             self.iface.mapCanvas().refresh()
+        except RuntimeError as e:
+            if "wrapped C/C++ object" in str(e):
+                self._footprints_layer = None
+                self._remove_selected_footprints()
+                return
+            self._log(f"Error syncing footprint selection: {e}", error=True)
         except Exception as e:
             self._log(f"Error syncing footprint selection: {e}", error=True)
+        finally:
+            self._syncing_footprint_table_selection = False
+
+    def _result_indices_for_selected_footprints(self, footprints_layer):
+        """Return search result indices for selected footprint features."""
+        selected_feature_ids = set(footprints_layer.selectedFeatureIds())
+        if not selected_feature_ids:
+            return []
+
+        result_indices = []
+        field_names = [field.name() for field in footprints_layer.fields()]
+        has_result_idx_field = "result_idx" in field_names
+        for feature_pos, feature in enumerate(footprints_layer.getFeatures()):
+            if feature.id() not in selected_feature_ids:
+                continue
+            if has_result_idx_field:
+                try:
+                    result_idx = int(feature["result_idx"])
+                except Exception:
+                    result_idx = feature_pos
+            else:
+                result_idx = feature_pos
+            result_indices.append(result_idx)
+        return list(dict.fromkeys(result_indices))
+
+    def _table_rows_for_result_indices(self, result_indices):
+        """Return current table rows that correspond to stable result indices."""
+        wanted = set(result_indices)
+        rows = []
+        for row in range(self.results_table.rowCount()):
+            if self._get_result_index_for_table_row(row) in wanted:
+                rows.append(row)
+        return rows
+
+    def _select_table_rows_for_result_indices(self, result_indices):
+        """Select result table rows matching map-selected footprint features."""
+        rows = self._table_rows_for_result_indices(result_indices)
+        selection_model = self.results_table.selectionModel()
+        if selection_model is None:
+            return
+
+        self._syncing_footprint_table_selection = True
+        try:
+            selection_model.clearSelection()
+            if not rows:
+                return
+            flag_scope = getattr(
+                QItemSelectionModel, "SelectionFlag", QItemSelectionModel
+            )
+            select_rows = getattr(flag_scope, "Select") | getattr(flag_scope, "Rows")
+            for row in rows:
+                index = self.results_table.model().index(row, 0)
+                selection_model.select(index, select_rows)
+            first_row = rows[0]
+            self.results_table.setCurrentCell(first_row, 0)
+            first_item = self.results_table.item(first_row, 0)
+            if first_item is not None:
+                self.results_table.scrollToItem(first_item)
+        finally:
+            self._syncing_footprint_table_selection = False
+
+    def _on_footprint_selection_changed(self, *_args):
+        """Select result table rows when footprint features are selected on the map."""
+        if self._syncing_footprint_table_selection:
+            return
+        footprints_layer = self._valid_layer_or_none("_footprints_layer")
+        if footprints_layer is None:
+            return
+        try:
+            result_indices = self._result_indices_for_selected_footprints(
+                footprints_layer
+            )
+            self._select_table_rows_for_result_indices(result_indices)
+            self._remove_selected_footprints()
+            if result_indices:
+                selected_features = []
+                selected = set(result_indices)
+                for feature_pos, feature in enumerate(footprints_layer.getFeatures()):
+                    try:
+                        feature_result_idx = int(feature["result_idx"])
+                    except Exception:
+                        feature_result_idx = feature_pos
+                    if feature_result_idx in selected:
+                        selected_features.append(feature)
+                self._add_selected_footprints_overlay(selected_features)
+            self._update_granule_details()
+            self._update_quicklook_preview()
+        except RuntimeError as e:
+            if "wrapped C/C++ object" in str(e):
+                self._footprints_layer = None
+                self._remove_selected_footprints()
+                return
+            self._log(f"Error syncing footprint selection to table: {e}", error=True)
+        except Exception as e:
+            self._log(f"Error syncing footprint selection to table: {e}", error=True)
 
     def _on_header_double_clicked(self, logical_index):
         """Handle double-click on table header to toggle sort order."""

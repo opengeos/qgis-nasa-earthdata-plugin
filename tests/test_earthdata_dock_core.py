@@ -184,6 +184,21 @@ def test_index_layer_visual_range_sets_normalized_bounds():
     assert layer.fake_renderer.maximum == 1.0
 
 
+def test_deleted_qgis_layer_wrapper_is_cleared():
+    class DeletedLayer:
+        def isValid(self):
+            raise RuntimeError(
+                "wrapped C/C++ object of type QgsVectorLayer has been deleted"
+            )
+
+    dock = type("Dock", (), {"_footprints_layer": DeletedLayer()})()
+
+    layer = EarthdataDockWidget._valid_layer_or_none(dock, "_footprints_layer")
+
+    assert layer is None
+    assert dock._footprints_layer is None
+
+
 def test_compact_result_id_preserves_start_and_end():
     result_id = "OPERA_L3_DSWx-HLS_T10SEG_20250510T184540Z_20250512T010101Z_L8_30_v1.0"
 
