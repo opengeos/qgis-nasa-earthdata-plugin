@@ -986,8 +986,15 @@ def normalized_difference(in_ar, out_ar, xoff, yoff, xsize, ysize,
         lines.extend(["  </VRTRasterBand>", "</VRTDataset>"])
         with open(output, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
+        # Keep this enabled for QGIS render passes after the Processing run.
+        gdal.SetConfigOption("GDAL_VRT_ENABLE_PYTHON", "YES")
+        gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+        gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF")
         if feedback:
             feedback.pushInfo(f"Wrote {index_name} VRT: {output}")
+            feedback.pushInfo(
+                "Enabled GDAL_VRT_ENABLE_PYTHON=YES for this plugin-generated VRT"
+            )
         if not os.path.exists(output):
             raise QgsProcessingException("Normalized difference VRT was not written")
         return {self.OUTPUT: output}
