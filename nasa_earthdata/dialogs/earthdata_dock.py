@@ -3434,7 +3434,6 @@ class EarthdataDockWidget(QDockWidget):
                 return
 
             selected_features = []
-            selected_feature_ids = []
             field_names = [f.name() for f in footprints_layer.fields()]
             has_result_idx_field = "result_idx" in field_names
 
@@ -3449,10 +3448,7 @@ class EarthdataDockWidget(QDockWidget):
 
                 if feature_result_idx in selected_indices:
                     selected_features.append(feature)
-                    selected_feature_ids.append(feature.id())
 
-            if selected_feature_ids:
-                footprints_layer.selectByIds(selected_feature_ids)
             self._add_selected_footprints_overlay(selected_features)
             self.iface.mapCanvas().refresh()
         except RuntimeError as e:
@@ -3548,6 +3544,11 @@ class EarthdataDockWidget(QDockWidget):
                     if feature_result_idx in selected:
                         selected_features.append(feature)
                 self._add_selected_footprints_overlay(selected_features)
+            self._syncing_footprint_table_selection = True
+            try:
+                footprints_layer.removeSelection()
+            finally:
+                self._syncing_footprint_table_selection = False
             self._update_granule_details()
             self._update_quicklook_preview()
         except RuntimeError as e:
