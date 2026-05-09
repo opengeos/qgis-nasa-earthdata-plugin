@@ -1,5 +1,6 @@
 from nasa_earthdata.dialogs.earthdata_dock import (
     CatalogData,
+    CatalogLoadWorker,
     DataSearchWorker,
     EarthdataDockWidget,
     _compact_result_id,
@@ -73,6 +74,45 @@ def test_data_search_worker_prefers_concept_id_over_short_name():
     assert kwargs["bounding_box"] == (-123.0, 37.0, -122.0, 38.0)
     assert kwargs["temporal"] == ("2025-01-01", "2025-01-31")
     assert kwargs["provider"] == "LPCLOUD"
+
+
+def test_catalog_load_worker_accepts_custom_catalog_and_cache_settings(tmp_path):
+    worker = CatalogLoadWorker(
+        force_refresh=True,
+        catalog_url="https://example.test/catalog.tsv",
+        cache_dir=str(tmp_path),
+        cache_enabled=False,
+    )
+
+    assert worker.catalog_url == "https://example.test/catalog.tsv"
+    assert worker.cache_dir == tmp_path
+    assert worker.cache_enabled is False
+
+
+def test_default_dataset_prefers_hlsl30_concept_id():
+    class FakeCombo:
+        def __init__(self):
+            self.items = [
+                {"short_name": "HLSL30", "concept_id": "C3322682485-LPCLOUD"},
+                {"short_name": "HLSS30", "concept_id": "C2021957295-LPCLOUD"},
+                {"short_name": "HLSL30", "concept_id": "C2021957657-LPCLOUD"},
+            ]
+            self.selected = None
+
+        def count(self):
+            return len(self.items)
+
+        def itemData(self, index):
+            return self.items[index]
+
+        def setCurrentIndex(self, index):
+            self.selected = index
+
+    dock = type("Dock", (), {"dataset_combo": FakeCombo()})()
+
+    EarthdataDockWidget._select_default_dataset(dock)
+
+    assert dock.dataset_combo.selected == 2
 
 
 def test_rgb_channel_guess_uses_common_band_tokens():

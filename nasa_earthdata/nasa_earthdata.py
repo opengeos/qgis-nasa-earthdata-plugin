@@ -34,6 +34,7 @@ class NASAEarthdata:
         self._earthdata_dock = None
         self._settings_dock = None
         self._deps_signal_connected = False
+        self._processing_provider = None
 
     def add_action(
         self,
@@ -168,6 +169,8 @@ class NASAEarthdata:
             parent=self.iface.mainWindow(),
         )
 
+        self._register_processing_provider()
+
     def unload(self):
         """Remove the plugin menu item and icon from QGIS GUI."""
         # Remove dock widgets
@@ -189,9 +192,49 @@ class NASAEarthdata:
         if self.toolbar:
             del self.toolbar
 
+        self._unregister_processing_provider()
+
         # Remove menu
         if self.menu:
             self.menu.deleteLater()
+
+    def _register_processing_provider(self):
+        """Register QGIS Processing provider when Processing is available."""
+        if self._processing_provider is not None:
+            return
+        try:
+            from qgis.core import QgsApplication
+
+            from .processing.provider import NASAEarthdataProcessingProvider
+
+            registry = QgsApplication.processingRegistry()
+            if registry is None:
+                return
+            self._processing_provider = NASAEarthdataProcessingProvider()
+            registry.addProvider(self._processing_provider)
+        except Exception as exc:
+            print(
+                f"NASA Earthdata: could not register Processing provider: {exc}",
+                file=sys.stderr,
+            )
+            self._processing_provider = None
+
+    def _unregister_processing_provider(self):
+        """Unregister QGIS Processing provider."""
+        if self._processing_provider is None:
+            return
+        try:
+            from qgis.core import QgsApplication
+
+            registry = QgsApplication.processingRegistry()
+            if registry is not None:
+                registry.removeProvider(self._processing_provider)
+        except Exception as exc:
+            print(
+                f"NASA Earthdata: could not unregister Processing provider: {exc}",
+                file=sys.stderr,
+            )
+        self._processing_provider = None
 
     def toggle_earthdata_dock(self):
         """Toggle the NASA Earthdata dock widget visibility."""
