@@ -2884,7 +2884,9 @@ class EarthdataDockWidget(QDockWidget):
         ]
         doi = str(summary.get("doi", "") or "").strip()
         if doi:
-            doi_url = doi if doi.lower().startswith("http") else f"https://doi.org/{doi}"
+            doi_url = (
+                doi if doi.lower().startswith("http") else f"https://doi.org/{doi}"
+            )
             fields.append(("DOI", self._link_html(doi_url, doi)))
         else:
             fields.append(("DOI", ""))
@@ -2898,7 +2900,7 @@ class EarthdataDockWidget(QDockWidget):
                 rendered = html.escape(value_text)
             rows.append(
                 "<tr>"
-                f"<th align=\"left\" valign=\"top\">{html.escape(label)}</th>"
+                f'<th align="left" valign="top">{html.escape(label)}</th>'
                 f"<td>{rendered}</td>"
                 "</tr>"
             )
