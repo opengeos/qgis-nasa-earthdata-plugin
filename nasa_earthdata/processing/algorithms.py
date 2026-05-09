@@ -249,7 +249,9 @@ class SearchEarthdataAlgorithm(_BaseAlgorithm):
         orbit_number = None
         if orbit_min or orbit_max:
             orbit_number = (
-                (orbit_min, orbit_max) if orbit_min and orbit_max else orbit_min or orbit_max
+                (orbit_min, orbit_max)
+                if orbit_min and orbit_max
+                else orbit_min or orbit_max
             )
 
         worker = DataSearchWorker(
@@ -258,9 +260,9 @@ class SearchEarthdataAlgorithm(_BaseAlgorithm):
             bbox,
             temporal,
             max_items,
-            cloud_cover=(cloud_min, cloud_max)
-            if cloud_min > 0 or cloud_max < 100
-            else None,
+            cloud_cover=(
+                (cloud_min, cloud_max) if cloud_min > 0 or cloud_max < 100 else None
+            ),
             day_night=day_night,
             provider=provider or None,
             version=version or None,
@@ -292,7 +294,11 @@ class SearchEarthdataAlgorithm(_BaseAlgorithm):
         )
         if output_json:
             write_granules_json(output_json, granules)
-        return {self.OUTPUT: output, self.OUTPUT_JSON: output_json, self.COUNT: len(granules)}
+        return {
+            self.OUTPUT: output,
+            self.OUTPUT_JSON: output_json,
+            self.COUNT: len(granules),
+        }
 
 
 class DownloadGranulesAlgorithm(_BaseAlgorithm):
@@ -544,9 +550,7 @@ class CreateNormalizedDifferenceVrtAlgorithm(_BaseAlgorithm):
         geotransform = source_ds.GetGeoTransform(can_return_null=True)
         source_ds = None
         geotransform_text = (
-            ", ".join(f"{value:.16g}" for value in geotransform)
-            if geotransform
-            else ""
+            ", ".join(f"{value:.16g}" for value in geotransform) if geotransform else ""
         )
 
         def esc(text):
@@ -586,10 +590,10 @@ def normalized_difference(in_ar, out_ar, xoff, yoff, xsize, ysize,
             lines.extend(
                 [
                     "    <SimpleSource>",
-                    f"      <SourceFilename relativeToVRT=\"0\">{esc(path)}</SourceFilename>",
+                    f'      <SourceFilename relativeToVRT="0">{esc(path)}</SourceFilename>',
                     "      <SourceBand>1</SourceBand>",
-                    f"      <SrcRect xOff=\"0\" yOff=\"0\" xSize=\"{width}\" ySize=\"{height}\"/>",
-                    f"      <DstRect xOff=\"0\" yOff=\"0\" xSize=\"{width}\" ySize=\"{height}\"/>",
+                    f'      <SrcRect xOff="0" yOff="0" xSize="{width}" ySize="{height}"/>',
+                    f'      <DstRect xOff="0" yOff="0" xSize="{width}" ySize="{height}"/>',
                     "    </SimpleSource>",
                 ]
             )

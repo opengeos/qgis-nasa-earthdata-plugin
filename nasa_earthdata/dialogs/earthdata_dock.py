@@ -1247,7 +1247,9 @@ class EarthdataDockWidget(QDockWidget):
         self.preview_text.setReadOnly(True)
         self.preview_text.setMinimumHeight(70)
         self.preview_text.setMaximumHeight(130)
-        self.preview_text.setPlaceholderText("Select a result to see quicklook and citation links...")
+        self.preview_text.setPlaceholderText(
+            "Select a result to see quicklook and citation links..."
+        )
         preview_layout.addWidget(self.preview_text)
         preview_btn_layout = QHBoxLayout()
         self.open_quicklook_btn = QPushButton("Open Quicklook")
@@ -2773,7 +2775,9 @@ class EarthdataDockWidget(QDockWidget):
             )
             return
 
-        default_path = str(workflow_dir(self.settings) / "earthdata_workflow_bundle.json")
+        default_path = str(
+            workflow_dir(self.settings) / "earthdata_workflow_bundle.json"
+        )
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Export NASA Earthdata Workflow Bundle",
@@ -2900,12 +2904,14 @@ class EarthdataDockWidget(QDockWidget):
             temporal,
             self.max_items_spin.value(),
             cloud_cover=(
-                advanced.get("cloud_min", 0),
-                advanced.get("cloud_max", 100),
-            )
-            if advanced.get("cloud_min", 0) > 0
-            or advanced.get("cloud_max", 100) < 100
-            else None,
+                (
+                    advanced.get("cloud_min", 0),
+                    advanced.get("cloud_max", 100),
+                )
+                if advanced.get("cloud_min", 0) > 0
+                or advanced.get("cloud_max", 100) < 100
+                else None
+            ),
             day_night=advanced.get("day_night"),
             provider=advanced.get("provider") or None,
             version=advanced.get("version") or None,
@@ -2940,7 +2946,9 @@ class EarthdataDockWidget(QDockWidget):
         self.check_new_btn.setEnabled(True)
         self._log(f"Check new granules error: {error_msg}", error=True)
         QMessageBox.warning(
-            self, "Check New Granules", f"Could not check for new granules:\n{error_msg}"
+            self,
+            "Check New Granules",
+            f"Could not check for new granules:\n{error_msg}",
         )
 
     def _sync_footprint_selection_from_table(self):
@@ -3312,9 +3320,7 @@ class EarthdataDockWidget(QDockWidget):
         projection = source_ds.GetProjectionRef() or ""
         geotransform = source_ds.GetGeoTransform(can_return_null=True)
         geotransform_text = (
-            ", ".join(f"{value:.16g}" for value in geotransform)
-            if geotransform
-            else ""
+            ", ".join(f"{value:.16g}" for value in geotransform) if geotransform else ""
         )
         source_ds = None
 
@@ -3356,10 +3362,14 @@ def normalized_difference(in_ar, out_ar, xoff, yoff, xsize, ysize,
             lines.extend(
                 [
                     "    <SimpleSource>",
-                    f"      <SourceFilename relativeToVRT=\"0\">{esc(path)}</SourceFilename>",
+                    f'      <SourceFilename relativeToVRT="0">{esc(path)}</SourceFilename>',
                     "      <SourceBand>1</SourceBand>",
-                    "      <SrcRect xOff=\"0\" yOff=\"0\" xSize=\"{}\" ySize=\"{}\"/>".format(width, height),
-                    "      <DstRect xOff=\"0\" yOff=\"0\" xSize=\"{}\" ySize=\"{}\"/>".format(width, height),
+                    '      <SrcRect xOff="0" yOff="0" xSize="{}" ySize="{}"/>'.format(
+                        width, height
+                    ),
+                    '      <DstRect xOff="0" yOff="0" xSize="{}" ySize="{}"/>'.format(
+                        width, height
+                    ),
                     "    </SimpleSource>",
                 ]
             )
@@ -3403,7 +3413,9 @@ def normalized_difference(in_ar, out_ar, xoff, yoff, xsize, ysize,
                     "The VRT was written but QGIS could not load it as a raster.",
                 )
         except Exception as e:
-            QMessageBox.critical(self, "Create Index VRT", f"Failed to create VRT:\n{e}")
+            QMessageBox.critical(
+                self, "Create Index VRT", f"Failed to create VRT:\n{e}"
+            )
 
     def _get_selected_cog_urls(self):
         """Return selected COG URLs from the list in visual row order."""

@@ -78,7 +78,9 @@ def cmr_collection_url(dataset_item):
 
 def cmr_collection_summary(payload):
     """Extract compact collection details from a CMR collections response."""
-    entries = payload.get("feed", {}).get("entry", []) if isinstance(payload, dict) else []
+    entries = (
+        payload.get("feed", {}).get("entry", []) if isinstance(payload, dict) else []
+    )
     if not entries:
         return {}
     entry = entries[0]
@@ -535,11 +537,11 @@ def granules_to_stac_item_collection(granules, dataset_item=None, gdf=None):
                 "collection": dataset_item.get("concept_id")
                 or dataset_item.get("short_name", ""),
                 "assets": assets,
-                "links": [
-                    {"rel": "collection", "href": dataset_item.get("concept_id", "")}
-                ]
-                if dataset_item.get("concept_id")
-                else [],
+                "links": (
+                    [{"rel": "collection", "href": dataset_item.get("concept_id", "")}]
+                    if dataset_item.get("concept_id")
+                    else []
+                ),
             }
         )
 

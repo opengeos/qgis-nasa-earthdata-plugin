@@ -274,4 +274,6 @@ def test_download_queue_state_round_trip(tmp_path):
 
     assert loaded["manifest"] == "manifest.csv"
     assert loaded["rows"][0]["native_id"] == "HLS"
-    assert download_queue_state_path(FakeSettings()).name == "download_queue_latest.json"
+    assert (
+        download_queue_state_path(FakeSettings()).name == "download_queue_latest.json"
+    )
