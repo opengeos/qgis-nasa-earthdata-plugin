@@ -156,6 +156,34 @@ def test_index_vrt_worker_is_lazy_and_configured(tmp_path):
     )
 
 
+def test_index_layer_visual_range_sets_normalized_bounds():
+    class FakeRenderer:
+        def __init__(self):
+            self.minimum = None
+            self.maximum = None
+
+        def setClassificationMin(self, value):
+            self.minimum = value
+
+        def setClassificationMax(self, value):
+            self.maximum = value
+
+    class FakeLayer:
+        def __init__(self):
+            self.fake_renderer = FakeRenderer()
+
+        def renderer(self):
+            return self.fake_renderer
+
+    dock = type("Dock", (), {"_log": lambda *args, **kwargs: None})()
+    layer = FakeLayer()
+
+    EarthdataDockWidget._set_index_layer_visual_range(dock, layer)
+
+    assert layer.fake_renderer.minimum == -1.0
+    assert layer.fake_renderer.maximum == 1.0
+
+
 def test_compact_result_id_preserves_start_and_end():
     result_id = "OPERA_L3_DSWx-HLS_T10SEG_20250510T184540Z_20250512T010101Z_L8_30_v1.0"
 

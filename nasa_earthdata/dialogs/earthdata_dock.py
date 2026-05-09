@@ -54,6 +54,7 @@ from qgis.core import (
     QgsProject,
     QgsVectorLayer,
     QgsRasterLayer,
+    QgsContrastEnhancement,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsRectangle,
@@ -3548,6 +3549,7 @@ class EarthdataDockWidget(QDockWidget):
         try:
             layer = QgsRasterLayer(output_path, f"NASA Earthdata {index_name.upper()}")
             if layer.isValid():
+                self._set_index_layer_visual_range(layer)
                 QgsProject.instance().addMapLayer(layer)
                 self._log(f"Added {index_name.upper()} VRT: {output_path}")
                 self._notify_success(
@@ -3573,6 +3575,37 @@ class EarthdataDockWidget(QDockWidget):
         QMessageBox.critical(
             self, "Create Index VRT", f"Failed to create VRT:\n{error_msg}"
         )
+
+    def _set_index_layer_visual_range(self, layer, minimum=-1.0, maximum=1.0):
+        """Set normalized-difference raster display range to [-1, 1]."""
+        try:
+            renderer = layer.renderer()
+            if renderer is None:
+                return
+
+            if hasattr(renderer, "setClassificationMin"):
+                renderer.setClassificationMin(float(minimum))
+            if hasattr(renderer, "setClassificationMax"):
+                renderer.setClassificationMax(float(maximum))
+
+            provider = layer.dataProvider() if hasattr(layer, "dataProvider") else None
+            data_type = provider.dataType(1) if provider is not None else None
+            enhancement = QgsContrastEnhancement(data_type)
+            enhancement.setMinimumValue(float(minimum))
+            enhancement.setMaximumValue(float(maximum))
+            algorithm = getattr(
+                QgsContrastEnhancement,
+                "StretchToMinimumMaximum",
+                None,
+            )
+            if algorithm is not None:
+                enhancement.setContrastEnhancementAlgorithm(algorithm, True)
+            if hasattr(renderer, "setContrastEnhancement"):
+                renderer.setContrastEnhancement(enhancement)
+            if hasattr(layer, "triggerRepaint"):
+                layer.triggerRepaint()
+        except Exception as e:
+            self._log(f"Could not set index visualization range: {e}", error=True)
 
     def _get_selected_cog_urls(self):
         """Return selected COG URLs from the list in visual row order."""
