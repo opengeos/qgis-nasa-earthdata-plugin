@@ -862,6 +862,107 @@ class DataDownloadWorker(QThread):
             self.error.emit(str(e))
 
 
+class IndexVrtWorker(QThread):
+    """Worker thread for creating normalized-difference VRT files."""
+
+    finished = pyqtSignal(str, str)  # index name, VRT path
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, positive, negative, index_name, output_path, parent=None):
+        super().__init__(parent)
+        self.positive = positive
+        self.negative = negative
+        self.index_name = index_name
+        self.output_path = output_path
+
+    def _source_path(self, value):
+        return f"/vsicurl/{value}" if value.lower().startswith("http") else value
+
+    def _escape_xml(self, text):
+        return (
+            str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        )
+
+    def _write_normalized_difference_vrt(self):
+        """Write a VRT that computes (positive - negative) / (positive + negative)."""
+        from osgeo import gdal
+
+        gdal.SetConfigOption("GDAL_VRT_ENABLE_PYTHON", "YES")
+        gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+        gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF")
+        positive_path = self._source_path(self.positive)
+        negative_path = self._source_path(self.negative)
+
+        self.progress.emit("Opening positive band source...")
+        source_ds = gdal.Open(positive_path)
+        if source_ds is None:
+            raise RuntimeError("Could not open positive band source")
+        width = source_ds.RasterXSize
+        height = source_ds.RasterYSize
+        projection = source_ds.GetProjectionRef() or ""
+        geotransform = source_ds.GetGeoTransform(can_return_null=True)
+        geotransform_text = (
+            ", ".join(f"{value:.16g}" for value in geotransform)
+            if geotransform
+            else ""
+        )
+        source_ds = None
+
+        code = """
+import numpy as np
+
+def normalized_difference(in_ar, out_ar, xoff, yoff, xsize, ysize,
+                          raster_xsize, raster_ysize, buf_radius, gt, **kwargs):
+    positive = in_ar[0].astype("float32")
+    negative = in_ar[1].astype("float32")
+    denominator = positive + negative
+    out_ar[:] = np.where(denominator == 0, 0, (positive - negative) / denominator)
+""".strip()
+        lines = [f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">']
+        if projection:
+            lines.append(f"  <SRS>{self._escape_xml(projection)}</SRS>")
+        if geotransform_text:
+            lines.append(f"  <GeoTransform>{geotransform_text}</GeoTransform>")
+        lines.extend(
+            [
+                '  <VRTRasterBand dataType="Float32" band="1" subClass="VRTDerivedRasterBand">',
+                f"    <Description>{self._escape_xml(self.index_name.upper())}</Description>",
+                "    <PixelFunctionType>normalized_difference</PixelFunctionType>",
+                "    <PixelFunctionLanguage>Python</PixelFunctionLanguage>",
+                f"    <PixelFunctionCode><![CDATA[{code}]]></PixelFunctionCode>",
+            ]
+        )
+        for path in (positive_path, negative_path):
+            lines.extend(
+                [
+                    "    <SimpleSource>",
+                    f'      <SourceFilename relativeToVRT="0">{self._escape_xml(path)}</SourceFilename>',
+                    "      <SourceBand>1</SourceBand>",
+                    '      <SrcRect xOff="0" yOff="0" xSize="{}" ySize="{}"/>'.format(
+                        width, height
+                    ),
+                    '      <DstRect xOff="0" yOff="0" xSize="{}" ySize="{}"/>'.format(
+                        width, height
+                    ),
+                    "    </SimpleSource>",
+                ]
+            )
+        lines.extend(["  </VRTRasterBand>", "</VRTDataset>"])
+
+        self.progress.emit("Writing normalized-difference VRT...")
+        with open(self.output_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+    def run(self):
+        """Create the normalized-difference VRT in the background."""
+        try:
+            self._write_normalized_difference_vrt()
+            self.finished.emit(self.index_name, self.output_path)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class EarthdataDockWidget(QDockWidget):
     """A dockable panel for NASA Earthdata search and visualization."""
 
@@ -910,6 +1011,7 @@ class EarthdataDockWidget(QDockWidget):
         self._download_worker = None
         self._cog_worker = None
         self._collection_worker = None
+        self._index_worker = None
 
         self._setup_ui()
         self._load_datasets()
@@ -3377,88 +3479,13 @@ class EarthdataDockWidget(QDockWidget):
         if links:
             self._populate_index_band_combos(links)
 
-    def _write_normalized_difference_vrt(self, output_path, positive, negative, label):
-        """Write a VRT that computes (positive - negative) / (positive + negative)."""
-        from osgeo import gdal
-
-        def source_path(value):
-            return f"/vsicurl/{value}" if value.lower().startswith("http") else value
-
-        gdal.SetConfigOption("GDAL_VRT_ENABLE_PYTHON", "YES")
-        gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
-        gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff,TIF,TIFF")
-        positive_path = source_path(positive)
-        negative_path = source_path(negative)
-        source_ds = gdal.Open(positive_path)
-        if source_ds is None:
-            raise RuntimeError("Could not open positive band source")
-        width = source_ds.RasterXSize
-        height = source_ds.RasterYSize
-        projection = source_ds.GetProjectionRef() or ""
-        geotransform = source_ds.GetGeoTransform(can_return_null=True)
-        geotransform_text = (
-            ", ".join(f"{value:.16g}" for value in geotransform) if geotransform else ""
-        )
-        source_ds = None
-
-        def esc(text):
-            return (
-                str(text)
-                .replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-            )
-
-        code = """
-import numpy as np
-
-def normalized_difference(in_ar, out_ar, xoff, yoff, xsize, ysize,
-                          raster_xsize, raster_ysize, buf_radius, gt, **kwargs):
-    positive = in_ar[0].astype("float32")
-    negative = in_ar[1].astype("float32")
-    denominator = positive + negative
-    out_ar[:] = np.where(denominator == 0, 0, (positive - negative) / denominator)
-""".strip()
-        lines = [
-            f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">',
-        ]
-        if projection:
-            lines.append(f"  <SRS>{esc(projection)}</SRS>")
-        if geotransform_text:
-            lines.append(f"  <GeoTransform>{geotransform_text}</GeoTransform>")
-        lines.extend(
-            [
-                '  <VRTRasterBand dataType="Float32" band="1" subClass="VRTDerivedRasterBand">',
-                f"    <Description>{esc(label.upper())}</Description>",
-                "    <PixelFunctionType>normalized_difference</PixelFunctionType>",
-                "    <PixelFunctionLanguage>Python</PixelFunctionLanguage>",
-                f"    <PixelFunctionCode><![CDATA[{code}]]></PixelFunctionCode>",
-            ]
-        )
-        for path in (positive_path, negative_path):
-            lines.extend(
-                [
-                    "    <SimpleSource>",
-                    f'      <SourceFilename relativeToVRT="0">{esc(path)}</SourceFilename>',
-                    "      <SourceBand>1</SourceBand>",
-                    '      <SrcRect xOff="0" yOff="0" xSize="{}" ySize="{}"/>'.format(
-                        width, height
-                    ),
-                    '      <DstRect xOff="0" yOff="0" xSize="{}" ySize="{}"/>'.format(
-                        width, height
-                    ),
-                    "    </SimpleSource>",
-                ]
-            )
-        lines.extend(["  </VRTRasterBand>", "</VRTDataset>"])
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-
     def _create_index_vrt(self):
-        """Create and add a normalized-difference VRT from selected COG bands."""
+        """Start a background normalized-difference VRT creation job."""
         positive = self.index_positive_combo.currentData()
         negative = self.index_negative_combo.currentData()
         index_name = self.index_type_combo.currentData() or "ndvi"
+        if self._index_worker is not None and self._index_worker.isRunning():
+            return
         if not positive or not negative:
             QMessageBox.warning(self, "Create Index VRT", "Select two input bands.")
             return
@@ -3472,10 +3499,30 @@ def normalized_difference(in_ar, out_ar, xoff, yoff, xsize, ysize,
             tempfile.gettempdir(),
             f"nasa_earthdata_{index_name}_{uuid.uuid4().hex}.vrt",
         )
+        self.create_index_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self._log(f"Creating {index_name.upper()} VRT...")
+
+        self._index_worker = IndexVrtWorker(positive, negative, index_name, output_path)
+        self._index_worker.progress.connect(self._log)
+        self._index_worker.finished.connect(self._on_index_vrt_finished)
+        self._index_worker.error.connect(self._on_index_vrt_error)
+        self._index_worker.start()
+
+    def _index_inputs_ready(self):
+        """Return whether index controls contain enough bands to build a VRT."""
+        return (
+            self.index_positive_combo.count() >= 2
+            and self.index_negative_combo.count() >= 2
+        )
+
+    def _on_index_vrt_finished(self, index_name, output_path):
+        """Add a completed normalized-difference VRT to the project."""
+        self.progress_bar.setVisible(False)
+        self.create_index_btn.setEnabled(self._index_inputs_ready())
+        self._index_worker = None
         try:
-            self._write_normalized_difference_vrt(
-                output_path, positive, negative, index_name
-            )
             layer = QgsRasterLayer(output_path, f"NASA Earthdata {index_name.upper()}")
             if layer.isValid():
                 QgsProject.instance().addMapLayer(layer)
@@ -3493,6 +3540,16 @@ def normalized_difference(in_ar, out_ar, xoff, yoff, xsize, ysize,
             QMessageBox.critical(
                 self, "Create Index VRT", f"Failed to create VRT:\n{e}"
             )
+
+    def _on_index_vrt_error(self, error_msg):
+        """Handle background normalized-difference VRT creation errors."""
+        self.progress_bar.setVisible(False)
+        self.create_index_btn.setEnabled(self._index_inputs_ready())
+        self._index_worker = None
+        self._log(f"Index VRT error: {error_msg}", error=True)
+        QMessageBox.critical(
+            self, "Create Index VRT", f"Failed to create VRT:\n{error_msg}"
+        )
 
     def _get_selected_cog_urls(self):
         """Return selected COG URLs from the list in visual row order."""
