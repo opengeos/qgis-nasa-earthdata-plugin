@@ -7,6 +7,7 @@ and downloading NASA Earthdata products in QGIS.
 
 import os
 import json
+import html
 import platform
 import tempfile
 import time
@@ -25,6 +26,7 @@ from qgis.PyQt.QtWidgets import (
     QPushButton,
     QLineEdit,
     QTextEdit,
+    QTextBrowser,
     QGroupBox,
     QComboBox,
     QSpinBox,
@@ -44,6 +46,8 @@ from qgis.PyQt.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QInputDialog,
+    QDialog,
+    QDialogButtonBox,
 )
 from qgis.PyQt.QtGui import QFont
 from qgis.core import (
@@ -1243,8 +1247,9 @@ class EarthdataDockWidget(QDockWidget):
 
         preview_group = QGroupBox()
         preview_layout = QVBoxLayout(preview_group)
-        self.preview_text = QTextEdit()
+        self.preview_text = QTextBrowser()
         self.preview_text.setReadOnly(True)
+        self.preview_text.setOpenExternalLinks(True)
         self.preview_text.setMinimumHeight(70)
         self.preview_text.setMaximumHeight(130)
         self.preview_text.setPlaceholderText(
@@ -2589,12 +2594,32 @@ class EarthdataDockWidget(QDockWidget):
         granule = self._search_results[result_index]
         quicklooks = granule_quicklook_links(granule)
         citations = granule_citation_links(granule)
-        lines = ["Quicklook / browse links:"]
-        lines.extend(quicklooks or ["No quicklook links found."])
-        lines.extend(["", "Citation / documentation links:"])
-        lines.extend(citations or ["No citation links found."])
-        self.preview_text.setPlainText("\n".join(lines))
+        html_parts = [
+            "<h4>Quicklook / browse links</h4>",
+            self._link_list_html(quicklooks, "No quicklook links found."),
+            "<h4>Citation / documentation links</h4>",
+            self._link_list_html(citations, "No citation links found."),
+        ]
+        self.preview_text.setHtml("".join(html_parts))
         self.open_quicklook_btn.setEnabled(bool(quicklooks))
+
+    def _link_html(self, url, label=None):
+        """Return an escaped external-link anchor for display widgets."""
+        url = str(url or "").strip()
+        if not url:
+            return ""
+        label = label or url
+        return (
+            f'<a href="{html.escape(url, quote=True)}">'
+            f"{html.escape(str(label))}</a>"
+        )
+
+    def _link_list_html(self, links, empty_text):
+        """Return a small HTML list of clickable links."""
+        if not links:
+            return f"<p>{html.escape(empty_text)}</p>"
+        items = "".join(f"<li>{self._link_html(link)}</li>" for link in links)
+        return f"<ul>{items}</ul>"
 
     def _open_selected_quicklook(self):
         """Open the first quicklook link for the selected granule."""
@@ -2823,25 +2848,75 @@ class EarthdataDockWidget(QDockWidget):
     def _on_collection_info_finished(self, summary):
         """Display fetched collection metadata."""
         self.collection_info_btn.setEnabled(True)
-        lines = [
-            f"Title: {summary.get('title', '')}",
-            f"Short Name: {summary.get('short_name', '')}",
-            f"Concept ID: {summary.get('concept_id', '')}",
-            f"Provider: {summary.get('provider', '')}",
-            f"Version: {summary.get('version_id', '')}",
-            f"Cloud Hosted: {summary.get('cloud_hosted', False)}",
-            f"Temporal Start: {summary.get('time_start', '')}",
-            f"Temporal End: {summary.get('time_end', '')}",
-            f"DOI: {summary.get('doi', '')}",
-            "",
-            "Summary:",
-            summary.get("summary", ""),
-            "",
-            "Links:",
-        ]
-        lines.extend(summary.get("links", []) or ["No links available"])
-        QMessageBox.information(self, "Collection Info", "\n".join(lines))
+        self._show_collection_info_dialog(summary)
         self._log(f"Loaded collection info for {summary.get('short_name', '')}")
+
+    def _show_collection_info_dialog(self, summary):
+        """Show CMR collection details with clickable links."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Collection Info")
+        dialog.resize(620, 460)
+
+        layout = QVBoxLayout(dialog)
+        browser = QTextBrowser(dialog)
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(self._collection_info_html(summary))
+        layout.addWidget(browser)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        exec_dialog = getattr(dialog, "exec", None) or getattr(dialog, "exec_", None)
+        if exec_dialog is not None:
+            exec_dialog()
+
+    def _collection_info_html(self, summary):
+        """Build rich collection-info HTML with clickable anchors."""
+        fields = [
+            ("Title", summary.get("title", "")),
+            ("Short Name", summary.get("short_name", "")),
+            ("Concept ID", summary.get("concept_id", "")),
+            ("Provider", summary.get("provider", "")),
+            ("Version", summary.get("version_id", "")),
+            ("Cloud Hosted", summary.get("cloud_hosted", False)),
+            ("Temporal Start", summary.get("time_start", "")),
+            ("Temporal End", summary.get("time_end", "")),
+        ]
+        doi = str(summary.get("doi", "") or "").strip()
+        if doi:
+            doi_url = doi if doi.lower().startswith("http") else f"https://doi.org/{doi}"
+            fields.append(("DOI", self._link_html(doi_url, doi)))
+        else:
+            fields.append(("DOI", ""))
+
+        rows = []
+        for label, value in fields:
+            value_text = str(value)
+            if value_text.startswith("<a "):
+                rendered = value_text
+            else:
+                rendered = html.escape(value_text)
+            rows.append(
+                "<tr>"
+                f"<th align=\"left\" valign=\"top\">{html.escape(label)}</th>"
+                f"<td>{rendered}</td>"
+                "</tr>"
+            )
+
+        summary_text = html.escape(str(summary.get("summary", "") or ""))
+        links_html = self._link_list_html(
+            summary.get("links", []), "No links available."
+        )
+        return (
+            "<html><body>"
+            "<h3>NASA Earthdata Collection</h3>"
+            f"<table cellspacing=\"6\">{''.join(rows)}</table>"
+            "<h4>Summary</h4>"
+            f"<p>{summary_text}</p>"
+            "<h4>Links</h4>"
+            f"{links_html}"
+            "</body></html>"
+        )
 
     def _on_collection_info_error(self, error_msg):
         """Handle CMR collection info errors."""
