@@ -13,6 +13,8 @@ from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMenu, QToolBar, QMessageBox
 
 OPEN_GEOAGENT_PLUGIN_CANDIDATES = ("open_geoagent",)
+TOOLBAR_OBJECT_NAME = "NASAEarthdataToolbar"
+MENU_TITLE = "&NASA Earthdata"
 
 
 class NASAEarthdata:
@@ -89,13 +91,16 @@ class NASAEarthdata:
 
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
+        self._remove_toolbars_by_object_name()
+        self._remove_menus_by_title()
+
         # Create menu
-        self.menu = QMenu("&NASA Earthdata")
+        self.menu = QMenu(MENU_TITLE)
         self.iface.mainWindow().menuBar().addMenu(self.menu)
 
         # Create toolbar
         self.toolbar = QToolBar("NASA Earthdata Toolbar")
-        self.toolbar.setObjectName("NASAEarthdataToolbar")
+        self.toolbar.setObjectName(TOOLBAR_OBJECT_NAME)
         self.iface.addToolBar(self.toolbar)
 
         # Get icon paths
@@ -175,6 +180,80 @@ class NASAEarthdata:
 
         self._register_processing_provider()
 
+    def _remove_toolbar(self, toolbar):
+        """Detach and schedule deletion of a plugin toolbar widget."""
+        if toolbar is None:
+            return
+
+        main_window = self.iface.mainWindow()
+        actions = []
+        try:
+            actions = list(toolbar.actions())
+        except Exception:
+            pass  # nosec B110
+        try:
+            toolbar.clear()
+        except Exception:
+            pass  # nosec B110
+        for action in actions:
+            try:
+                action.deleteLater()
+            except Exception:
+                pass  # nosec B110
+        try:
+            main_window.removeToolBar(toolbar)
+        except Exception:
+            pass  # nosec B110
+        try:
+            toolbar.hide()
+        except Exception:
+            pass  # nosec B110
+        try:
+            toolbar.setParent(None)
+        except Exception:
+            pass  # nosec B110
+        try:
+            toolbar.deleteLater()
+        except Exception:
+            pass  # nosec B110
+
+    def _remove_toolbars_by_object_name(self):
+        """Remove current or stale NASA Earthdata toolbars from QGIS."""
+        main_window = self.iface.mainWindow()
+        for toolbar in main_window.findChildren(QToolBar, TOOLBAR_OBJECT_NAME):
+            self._remove_toolbar(toolbar)
+
+    def _remove_menu(self, menu):
+        """Detach and schedule deletion of a plugin menu."""
+        if menu is None:
+            return
+
+        main_window = self.iface.mainWindow()
+        try:
+            menu.clear()
+        except Exception:
+            pass  # nosec B110
+        try:
+            main_window.menuBar().removeAction(menu.menuAction())
+        except Exception:
+            pass  # nosec B110
+        try:
+            menu.setParent(None)
+        except Exception:
+            pass  # nosec B110
+        try:
+            menu.deleteLater()
+        except Exception:
+            pass  # nosec B110
+
+    def _remove_menus_by_title(self):
+        """Remove current or stale NASA Earthdata menus from QGIS."""
+        menu_bar = self.iface.mainWindow().menuBar()
+        for action in menu_bar.actions():
+            menu = action.menu()
+            if menu is not None and menu.title() == MENU_TITLE:
+                self._remove_menu(menu)
+
     def unload(self):
         """Remove the plugin menu item and icon from QGIS GUI."""
         # Remove dock widgets
@@ -188,19 +267,28 @@ class NASAEarthdata:
             self._settings_dock.deleteLater()
             self._settings_dock = None
 
-        # Remove actions from menu
+        # Remove actions from plugin UI containers.
         for action in self.actions:
-            self.iface.removePluginMenu("&NASA Earthdata", action)
+            if self.toolbar:
+                self.toolbar.removeAction(action)
+            if self.menu:
+                self.menu.removeAction(action)
+            action.deleteLater()
+        self.actions = []
 
         # Remove toolbar
         if self.toolbar:
-            del self.toolbar
+            self._remove_toolbar(self.toolbar)
+            self.toolbar = None
+        self._remove_toolbars_by_object_name()
 
         self._unregister_processing_provider()
 
         # Remove menu
         if self.menu:
-            self.menu.deleteLater()
+            self._remove_menu(self.menu)
+            self.menu = None
+        self._remove_menus_by_title()
         try:
             if getattr(self.iface, "_nasa_earthdata_plugin", None) is self:
                 delattr(self.iface, "_nasa_earthdata_plugin")
