@@ -3,7 +3,7 @@ name=NASA Earthdata
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 description=Search, visualize, and download NASA Earthdata products in QGIS. Supports COG visualization and data footprint display.
-version=0.9.0
+version=0.9.1
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -37,6 +37,9 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.9.1
+        - Make Settings dock status labels theme-aware so text stays readable on dark QGIS themes
+        - Clean up stale NASA Earthdata toolbars and menus on init/unload to prevent duplicates after plugin reload
     0.9.0
         - Add quicklook gallery, cached thumbnails, and improved preview behavior
         - Add richer result table filtering and bidirectional footprint/table selection
