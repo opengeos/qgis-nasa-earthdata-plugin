@@ -18,6 +18,7 @@ OPEN_GEOAGENT_PLUGIN_CANDIDATES = ("open_geoagent",)
 TOOLBAR_OBJECT_NAME = "NASAEarthdataToolbar"
 MENU_TITLE = "&NASA Earthdata"
 
+
 class NASAEarthdata:
     """NASA Earthdata Plugin implementation class for QGIS."""
 
@@ -179,7 +180,6 @@ class NASAEarthdata:
         )
 
         self._register_processing_provider()
-
 
     def _remove_toolbar(self, toolbar):
         """Detach and schedule deletion of a plugin toolbar widget."""
