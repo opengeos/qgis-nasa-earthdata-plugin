@@ -27,7 +27,7 @@ from qgis.PyQt.QtWidgets import (
     QTabWidget,
     QProgressBar,
 )
-from qgis.PyQt.QtGui import QFont
+from qgis.PyQt.QtGui import QFont, QPalette
 
 
 class SettingsDockWidget(QDockWidget):
@@ -57,6 +57,33 @@ class SettingsDockWidget(QDockWidget):
 
         self._setup_ui()
         self._load_settings()
+
+    def _uses_dark_palette(self):
+        """Return whether the active Qt palette is dark."""
+        window_role = getattr(QPalette, "ColorRole", QPalette).Window
+        color = self.palette().color(window_role)
+        luminance = (
+            0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue()
+        )
+        return luminance < 128
+
+    def _text_style(self, tone="text", font_size=None, bold=False):
+        """Build readable label styles for both light and dark QGIS themes."""
+        dark = self._uses_dark_palette()
+        colors = {
+            "text": "#f0f3f5" if dark else "#202124",
+            "muted": "#d0d7de" if dark else "#5f6368",
+            "success": "#7ee2a8" if dark else "#1b5e20",
+            "warning": "#ffd166" if dark else "#8a5a00",
+            "error": "#ff8a80" if dark else "#b00020",
+            "info": "#9cc9ff" if dark else "#0b57d0",
+        }
+        declarations = [f"color: {colors.get(tone, colors['text'])};"]
+        if font_size is not None:
+            declarations.append(f"font-size: {font_size}px;")
+        if bold:
+            declarations.append("font-weight: bold;")
+        return " ".join(declarations)
 
     def _setup_ui(self):
         """Set up the settings UI."""
@@ -134,7 +161,7 @@ class SettingsDockWidget(QDockWidget):
             "Register at: https://urs.earthdata.nasa.gov/"
         )
         info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #666; font-size: 10px;")
+        info_label.setStyleSheet(self._text_style("muted", font_size=10))
         creds_layout.addRow(info_label)
 
         # Username
@@ -169,7 +196,7 @@ class SettingsDockWidget(QDockWidget):
             "The file should be located at: ~/.netrc"
         )
         netrc_info.setWordWrap(True)
-        netrc_info.setStyleSheet("color: #666; font-size: 10px;")
+        netrc_info.setStyleSheet(self._text_style("muted", font_size=10))
         netrc_layout.addRow(netrc_info)
 
         # Check netrc
@@ -491,11 +518,11 @@ class SettingsDockWidget(QDockWidget):
 
         if not username or not password:
             self.creds_status_label.setText("Please enter username and password")
-            self.creds_status_label.setStyleSheet("color: orange;")
+            self.creds_status_label.setStyleSheet(self._text_style("warning"))
             return
 
         self.creds_status_label.setText("Testing credentials...")
-        self.creds_status_label.setStyleSheet("color: blue;")
+        self.creds_status_label.setStyleSheet(self._text_style("info"))
 
         try:
             from ..core.venv_manager import import_earthaccess
@@ -514,20 +541,20 @@ class SettingsDockWidget(QDockWidget):
                 self._save_netrc(username, password)
                 self.creds_status_label.setText("✓ Credentials valid! Saved to .netrc")
                 self.creds_status_label.setStyleSheet(
-                    "color: green; font-weight: bold;"
+                    self._text_style("success", bold=True)
                 )
                 # Update netrc status
                 self._check_netrc()
             else:
                 self.creds_status_label.setText("✗ Authentication failed")
-                self.creds_status_label.setStyleSheet("color: red;")
+                self.creds_status_label.setStyleSheet(self._text_style("error"))
 
         except ImportError as e:
             self.creds_status_label.setText(str(e)[:200])
-            self.creds_status_label.setStyleSheet("color: red;")
+            self.creds_status_label.setStyleSheet(self._text_style("error"))
         except Exception as e:
             self.creds_status_label.setText(f"Error: {str(e)[:50]}")
-            self.creds_status_label.setStyleSheet("color: red;")
+            self.creds_status_label.setStyleSheet(self._text_style("error"))
 
     def _save_netrc(self, username, password):
         """Save NASA Earthdata credentials to .netrc file."""
@@ -586,7 +613,7 @@ class SettingsDockWidget(QDockWidget):
 
         if not netrc_path.exists():
             self.netrc_status_label.setText("✗ .netrc file not found")
-            self.netrc_status_label.setStyleSheet("color: orange;")
+            self.netrc_status_label.setStyleSheet(self._text_style("warning"))
             return
 
         try:
@@ -601,15 +628,15 @@ class SettingsDockWidget(QDockWidget):
                     f"✓ Found Earthdata credentials for: {username}"
                 )
                 self.netrc_status_label.setStyleSheet(
-                    "color: green; font-weight: bold;"
+                    self._text_style("success", bold=True)
                 )
             else:
                 self.netrc_status_label.setText("✗ No Earthdata credentials in .netrc")
-                self.netrc_status_label.setStyleSheet("color: orange;")
+                self.netrc_status_label.setStyleSheet(self._text_style("warning"))
 
         except Exception as e:
             self.netrc_status_label.setText(f"Error reading .netrc: {str(e)[:30]}")
-            self.netrc_status_label.setStyleSheet("color: red;")
+            self.netrc_status_label.setStyleSheet(self._text_style("error"))
 
     def _get_netrc_earthdata_credentials(self):
         """Return Earthdata credentials from ~/.netrc if available."""
@@ -700,12 +727,12 @@ class SettingsDockWidget(QDockWidget):
             self.creds_status_label.setText(
                 "Using credentials from ~/.netrc (preferred)"
             )
-            self.creds_status_label.setStyleSheet("color: green;")
+            self.creds_status_label.setStyleSheet(self._text_style("success"))
         elif source == "environment":
             self.creds_status_label.setText(
                 "Using credentials from EARTHDATA_USERNAME/EARTHDATA_PASSWORD"
             )
-            self.creds_status_label.setStyleSheet("color: green;")
+            self.creds_status_label.setStyleSheet(self._text_style("success"))
 
         # General
         self.download_dir_input.setText(
@@ -767,16 +794,16 @@ class SettingsDockWidget(QDockWidget):
                     "✓ Credentials saved to ~/.netrc and environment"
                 )
                 self.creds_status_label.setStyleSheet(
-                    "color: green; font-weight: bold;"
+                    self._text_style("success", bold=True)
                 )
             except Exception as e:
                 self.creds_status_label.setText(f"Failed to save .netrc: {str(e)[:50]}")
-                self.creds_status_label.setStyleSheet("color: red;")
+                self.creds_status_label.setStyleSheet(self._text_style("error"))
         elif username:
             self.creds_status_label.setText(
                 "Username saved. Enter password and Save to persist to ~/.netrc"
             )
-            self.creds_status_label.setStyleSheet("color: orange;")
+            self.creds_status_label.setStyleSheet(self._text_style("warning"))
 
         # General
         self.settings.setValue(
